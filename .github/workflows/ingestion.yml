@@ -48,17 +48,15 @@ jobs:
                     'Season months are Mar–Nov and year must be within config range.')
               sys.exit(0)
 
-          # execute each job once; each function is season-guarded too
+          # One odds API call per day: morning pull fetches opening lines,
+          # generates picks, and saves the consensus snapshot.
+          # afternoon_update is omitted to stay within the 500 req/month quota.
           from src.ingestion.scheduler import (
               morning_data_pull,
-              midday_odds_pull,
-              afternoon_update,
               overnight_results,
           )
 
           morning_data_pull()
-          midday_odds_pull()
-          afternoon_update()
           overnight_results()
           PYTHON
       - name: Pre-compute aggregated datasets

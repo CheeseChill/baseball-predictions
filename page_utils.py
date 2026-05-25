@@ -135,30 +135,15 @@ def _fetch_todays_schedule() -> list[dict]:
         return []
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=86400)
 def _load_latest_odds() -> pd.DataFrame:
-    """Return today's odds — live from The Odds API if ODDS_API_KEY is set,
-    otherwise fall back to the most-recent saved CSV."""
-    import os
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(ROOT / ".env", override=False)
-    except ImportError:
-        pass
-    api_key = os.environ.get("ODDS_API_KEY", "")
-    if not api_key:
-        try:
-            api_key = st.secrets.get("ODDS_API_KEY", "")
-        except Exception:
-            api_key = ""
-    if api_key:
-        try:
-            from src.ingestion.odds import fetch_current_odds
-            return fetch_current_odds()
-        except Exception:
-            pass  # fall through to saved CSV
+    """Return today's odds from the most-recent saved CSV written by the morning pipeline.
 
-    # Fallback: most-recent saved file
+    The live Odds API is intentionally NOT called here to conserve the monthly
+    quota (500 req/month free tier). The nightly CI job writes the CSV via
+    morning_data_pull(); the dashboard reads that file.
+    """
+    # Most-recent saved file written by morning_data_pull
     odds_dir = ROOT / "data_files" / "raw" / "odds"
     if not odds_dir.exists():
         return pd.DataFrame()
