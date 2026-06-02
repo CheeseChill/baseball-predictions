@@ -80,6 +80,24 @@ jobs:
           train_main()
           PYTHON
 
+      - name: Run daily picks pipeline (season-aware)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          python - <<'PYTHON'
+          from datetime import datetime
+          import sys
+          from src.ingestion.season import in_season
+
+          if not in_season(datetime.utcnow()):
+              print('Outside baseball season; skipping picks pipeline.')
+              sys.exit(0)
+
+          from src.picks.daily_pipeline import run_daily_pipeline
+          run_daily_pipeline()
+          PYTHON
+        continue-on-error: true
+
       - name: Export best bets for Sports Picks Grid
         run: python scripts/export_best_bets.py
         continue-on-error: true
