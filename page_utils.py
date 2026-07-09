@@ -612,20 +612,33 @@ def _fetch_espn_odds() -> list[dict]:
     Fetch today's MLB odds from ESPN's public APIs.
     1. Scoreboard (with date + limit=30) -> all events
     2. Per-event odds from sports.core.api.espn.com (parallel)
-    Free, no key needed. Cached 30 min.
+    Free, no key needed. Cached 60s. Retries transient failures.
     """
     import requests as _requests
-    import datetime as _dt
+    import time as _time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    today = _dt.date.today().strftime("%Y%m%d")
+    def _get_with_retry(url, timeout=10, retries=3, backoff=0.6):
+        last_exc = None
+        for attempt in range(retries):
+            try:
+                resp = _requests.get(url, timeout=timeout)
+                if resp.status_code == 429:
+                    _time.sleep(backoff * (attempt + 1) * 2)
+                    continue
+                resp.raise_for_status()
+                return resp
+            except Exception as e:
+                last_exc = e
+                _time.sleep(backoff * (attempt + 1))
+        raise last_exc if last_exc else RuntimeError("fetch failed")
+
+    today = datetime.datetime.now(pytz.timezone('America/New_York')).strftime("%Y%m%d")
     try:
-        resp = _requests.get(
+        resp = _get_with_retry(
             f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
-            f"?dates={today}&limit=30",
-            timeout=10,
+            f"?dates={today}&limit=30"
         )
-        resp.raise_for_status()
         events = resp.json().get("events", [])
     except Exception:
         return []
@@ -641,10 +654,9 @@ def _fetch_espn_odds() -> list[dict]:
             away_name = next(
                 (c["team"]["displayName"] for c in comp["competitors"] if c["homeAway"] == "away"), ""
             )
-            odds_resp = _requests.get(
+            odds_resp = _get_with_retry(
                 f"https://sports.core.api.espn.com/v2/sports/baseball/leagues/mlb"
-                f"/events/{eid}/competitions/{cid}/odds",
-                timeout=10,
+                f"/events/{eid}/competitions/{cid}/odds"
             )
             items = odds_resp.json().get("items", [])
             if not items:
