@@ -6,6 +6,7 @@ Import from this module instead of duplicating code across pages.
 import sys
 import math
 import datetime
+import pytz
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,7 @@ _MLB_TO_RETRO: dict[str, str] = {
     "Baltimore Orioles": "Orioles",
     "Boston Red Sox": "Red Sox",
     "Chicago Cubs": "Cubs",
-    "Chicago White Sox": "White Sox",
+    "Chicago White Sox": "White",
     "Cincinnati Reds": "Reds",
     "Cleveland Guardians": "Guardians",
     "Colorado Rockies": "Rockies",
@@ -126,9 +127,9 @@ READABLE_COLS: dict[str, str] = {
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _fetch_todays_schedule() -> list[dict]:
-    """Fetch today's MLB schedule via the MLB Stats API. Cached 1 hour."""
+    """Fetch today's MLB schedule via the MLB Stats API. Cached 1 minute."""
     try:
-        today = datetime.date.today().strftime("%Y-%m-%d")
+        today = datetime.datetime.now(pytz.timezone('America/New_York')).strftime("%Y-%m-%d")
         games = statsapi.schedule(date=today)
         return [g for g in games if g.get("game_type", "R") in ("R", "F", "D", "L", "W", "S")]
     except Exception:
@@ -362,7 +363,7 @@ def _load_game_context_cache() -> dict:
     return out
 
 
-@st.cache_data(show_spinner=False, ttl=1800)
+@st.cache_data(show_spinner=False, ttl=600)
 def _fetch_game_umpires(game_pk: int) -> dict:
     """Fetch the umpire crew for a specific game via the MLB Stats API.
 
@@ -491,7 +492,7 @@ def _fetch_pitcher_throw_hand(pitcher_name: str) -> str:
     return "?"
 
 
-@st.cache_data(show_spinner=False, ttl=1800)
+@st.cache_data(show_spinner=False, ttl=900)
 def _fetch_team_il_players(team_full_name: str) -> list[str]:
     """Return list of IL player names for a team via statsapi injured list roster."""
     try:
@@ -505,7 +506,7 @@ def _fetch_team_il_players(team_full_name: str) -> list[str]:
         return []
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=1800)
 def _fetch_team_rest_days(team_full_name: str) -> int | None:
     """Return days since the team's last game (0 = back-to-back, None = unknown)."""
     try:
@@ -576,7 +577,7 @@ def _fetch_team_standings(season: int | None = None) -> dict[str, dict]:
         return {}
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=1800)
 def _fetch_pitcher_stats(pitcher_name: str) -> dict:
     """Season pitching stats for a named pitcher via the free MLB Stats API."""
     if not pitcher_name or pitcher_name.strip().upper() == "TBD":
@@ -605,7 +606,7 @@ def _fetch_pitcher_stats(pitcher_name: str) -> dict:
         return {}
 
 
-@st.cache_data(show_spinner=False, ttl=1800)
+@st.cache_data(show_spinner=False, ttl=60)
 def _fetch_espn_odds() -> list[dict]:
     """
     Fetch today's MLB odds from ESPN's public APIs.
@@ -670,7 +671,7 @@ def _fetch_espn_odds() -> list[dict]:
             return None
 
     result = []
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(_fetch_one, e): e for e in events}
         for fut in as_completed(futures):
             item = fut.result()
