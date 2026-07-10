@@ -159,18 +159,18 @@ def _build_game_recs(
     spread_h_val = _parse_american(spread_h_raw)
     spread_a_val = _parse_american(spread_a_raw)
 
-    # Use moneyline odds to determine who is the run-line (-1.5) favorite.
-    # Lower (more negative) American ML odds = stronger favorite = they give -1.5.
-    # Fall back to spread-odds heuristic: the -1.5 team gets POSITIVE return odds
-    # because covering 1.5 runs is harder; the +1.5 team pays negative juice.
+    # Use ESPN's actual run-line odds to determine who is the -1.5 favorite
+    # (most reliable — this is the real market data for this specific market).
+    # Fall back to moneyline heuristic only if ESPN spread odds are missing:
+    # lower (more negative) ML odds = stronger favorite = they give -1.5.
     ml_h_val = _parse_american(espn_game.get("ml_home"))
     ml_a_val = _parse_american(espn_game.get("ml_away"))
 
-    if ml_h_val is not None and ml_a_val is not None:
-        home_favorite = ml_h_val < ml_a_val
-    elif spread_h_val is not None and spread_a_val is not None:
+    if spread_h_val is not None and spread_a_val is not None:
         # Positive spread odds → that team is the -1.5 side
         home_favorite = spread_h_val > 0 and spread_a_val <= 0
+    elif ml_h_val is not None and ml_a_val is not None:
+        home_favorite = ml_h_val < ml_a_val
     else:
         home_favorite = False
 
