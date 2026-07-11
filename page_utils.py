@@ -44,7 +44,7 @@ _MLB_TO_RETRO: dict[str, str] = {
     "Baltimore Orioles": "Orioles",
     "Boston Red Sox": "Red Sox",
     "Chicago Cubs": "Cubs",
-    "Chicago White Sox": "White",
+    "Chicago White Sox": "White Sox",
     "Cincinnati Reds": "Reds",
     "Cleveland Guardians": "Guardians",
     "Colorado Rockies": "Rockies",
