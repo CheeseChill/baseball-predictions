@@ -37,6 +37,7 @@ jobs:
       - name: Run ingestion (season-aware)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          THERUNDOWN_API_KEY: ${{ secrets.THERUNDOWN_API_KEY }}
         run: |
           python - <<'PYTHON'
           from datetime import datetime
@@ -48,23 +49,29 @@ jobs:
                     'Season months are Mar–Nov and year must be within config range.')
               sys.exit(0)
 
-          # One odds API call per day: morning pull fetches opening lines,
-          # generates picks, and saves the consensus snapshot.
+          # Morning pull removed — daily picks pipeline handles odds fetch.
           # afternoon_update is omitted to stay within the 500 req/month quota.
-          from src.ingestion.scheduler import (
-              morning_data_pull,
-              overnight_results,
-          )
+          from src.ingestion.scheduler import overnight_results
 
-          morning_data_pull()
           overnight_results()
           PYTHON
       - name: Pre-compute aggregated datasets
         run: python scripts/precompute_data.py
 
+      - name: Commit precomputed data and current-season supplements
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name  "github-actions[bot]"
+          git add data_files/processed/
+          git add data_files/retrosheet/*_current.parquet 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "chore: update precomputed data and season supplements [skip ci]"
+          git push
+        continue-on-error: true
+
       - name: Train models (season-aware)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          THERUNDOWN_API_KEY: ${{ secrets.THERUNDOWN_API_KEY }}
         run: |
           python - <<'PYTHON'
           from datetime import datetime
@@ -83,6 +90,7 @@ jobs:
       - name: Run daily picks pipeline (season-aware)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          THERUNDOWN_API_KEY: ${{ secrets.THERUNDOWN_API_KEY }}
         run: |
           python - <<'PYTHON'
           from datetime import datetime
