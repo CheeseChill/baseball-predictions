@@ -191,10 +191,10 @@ def predict_totals(
     ).round(4)
 
     if over_price_col and over_price_col in game_features.columns:
-        results["edge_over"] = game_features[over_price_col].apply(
-            lambda odds: float(probs_over[results.index])
-            - implied_probability(int(odds))
-            if pd.notna(odds) else np.nan
-        )
+        over_odds = game_features[over_price_col].values
+        results["edge_over"] = [
+            float(p) - implied_probability(int(odds)) if pd.notna(odds) else np.nan
+            for p, odds in zip(probs_over, over_odds)
+        ]
 
     return results

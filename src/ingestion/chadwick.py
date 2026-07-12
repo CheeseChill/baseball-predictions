@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 CHADWICK_URL = (
     "https://raw.githubusercontent.com/chadwickbureau/register/master/data/people.csv"
 )
+# As of mid-2026 the Chadwick Bureau register repo split the old single
+# data/people.csv into 16 shards (people-0.csv .. people-f.csv, partitioned
+# by the first hex digit of key_uuid). The single-file URL above 404s now;
+# fall back to fetching and concatenating all 16 shards.
+CHADWICK_SHARD_URLS = [
+    f"https://raw.githubusercontent.com/chadwickbureau/register/master/data/people-{h}.csv"
+    for h in "0123456789abcdef"
+]
 
 _PROCESSED = Path(__file__).resolve().parents[2] / "data_files" / "processed"
 _REGISTRY_PATH = _PROCESSED / "player_registry.parquet"
@@ -61,9 +69,19 @@ def load_player_registry(force_refresh: bool = False) -> pd.DataFrame:
     logger.info("Fetching Chadwick Bureau player registry from GitHub…")
     try:
         df = pd.read_csv(CHADWICK_URL, dtype=str, low_memory=False)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to fetch Chadwick registry: %s", exc)
-        return pd.DataFrame(columns=_KEEP_COLS)
+    except Exception:  # noqa: BLE001
+        # Old single-file URL is gone as of the register repo's 2026
+        # restructure — fetch the 16 people-{0-9a-f}.csv shards instead.
+        shards = []
+        for url in CHADWICK_SHARD_URLS:
+            try:
+                shards.append(pd.read_csv(url, dtype=str, low_memory=False))
+            except Exception as shard_exc:  # noqa: BLE001
+                logger.error("Failed to fetch Chadwick shard %s: %s", url, shard_exc)
+        if not shards:
+            logger.error("Failed to fetch Chadwick registry: no shards downloaded")
+            return pd.DataFrame(columns=_KEEP_COLS)
+        df = pd.concat(shards, ignore_index=True)
 
     keep = [c for c in _KEEP_COLS if c in df.columns]
     df = df[keep].copy()

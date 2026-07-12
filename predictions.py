@@ -9,6 +9,7 @@ Entry point for the Betting Cleanup MLB dashboard.
 import sys
 import datetime
 import math
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +33,17 @@ from page_utils import (
     init_session_state,
     add_betting_oracle_footer,
 )
+
+from src.models.today_features import build_todays_features, team_short_name
+from src.models.underdog_model import predict_moneyline
+from src.models.spread_model import predict_spread
+from src.models.totals_model import predict_totals
+from src.ingestion.mlb_stats import fetch_todays_probable_pitchers
+from src.ingestion.weather import fetch_weather_for_games
+
+logger = logging.getLogger(__name__)
+
+MODEL_DIR = ROOT / "models"
 
 st.set_page_config(
     page_title="Betting Cleanup - MLB Predictions",
@@ -78,8 +90,65 @@ def get_dataframe_height(df, row_height=35, header_height=38, padding=2, max_hei
     return calculated_height
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Model predictions (Phase 3: real XGBoost models, replaces hand-coded
+# heuristics). Built once per page load and looked up per game below.
 # ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_model_predictions() -> pd.DataFrame:
+    """Build today's feature matrix and run all 3 trained models.
+
+    Returns a DataFrame with one row per game: hometeam, visteam,
+    pred_home_win_prob, pred_home_cover_prob, pred_over_prob, model_exp_total.
+    Returns an empty DataFrame if the schedule/features/models are
+    unavailable — callers must fall back to the heuristics in that case.
+    """
+    try:
+        schedule = fetch_todays_probable_pitchers()
+        if schedule.empty:
+            return pd.DataFrame()
+
+        # No live sportsbook odds are wired into the feature matrix here —
+        # ESPN odds (used for edge/UI below) are fetched separately and
+        # don't affect the models' probability outputs.
+        odds = pd.DataFrame(columns=["away_team", "home_team"])
+        weather = fetch_weather_for_games(schedule)
+
+        features = build_todays_features(schedule, odds, weather)
+        if features.empty:
+            return pd.DataFrame()
+
+        ml_preds = predict_moneyline(MODEL_DIR / "moneyline_xgb_v1.joblib", features)
+        rl_preds = predict_spread(MODEL_DIR / "spread_xgb_v1.joblib", features)
+        ou_preds = predict_totals(MODEL_DIR / "totals_xgb_v1.joblib", features)
+
+        out = features[["hometeam", "visteam"]].copy()
+        out["pred_home_win_prob"]   = ml_preds["pred_home_win_prob"].values
+        out["pred_home_cover_prob"] = rl_preds["pred_cover_prob"].values
+        out["pred_over_prob"]       = ou_preds["pred_prob_over"].values
+        out["model_exp_total"]      = features["exp_total"].values
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Model prediction pipeline failed, falling back to heuristics: %s", exc)
+        return pd.DataFrame()
+
+
+def _get_model_row(model_preds: pd.DataFrame, home_full: str, away_full: str) -> dict | None:
+    """Look up a game's model predictions by MLB Stats API full team names."""
+    if model_preds.empty:
+        return None
+    try:
+        home_short = team_short_name(home_full)
+        away_short = team_short_name(away_full)
+    except KeyError:
+        return None
+    match = model_preds[
+        (model_preds["hometeam"] == home_short) & (model_preds["visteam"] == away_short)
+    ]
+    if match.empty:
+        return None
+    return match.iloc[0].to_dict()
+
 
 def _short(full_name: str) -> str:
     """Last word of a team name, e.g. 'New York Yankees' -> 'Yankees'."""
@@ -103,14 +172,23 @@ def _build_game_recs(
     espn_game: dict | None,
     standings: dict,
     hist_stnd: pd.DataFrame,
+    model_row: dict | None = None,
 ) -> dict:
     """
     Build moneyline / run-line / over-under recommendations for one game.
     Returns dict with optional keys 'ml', 'rl', 'ou'.
+
+    model_row, when present, carries pred_home_win_prob / pred_home_cover_prob /
+    pred_over_prob from the trained XGBoost models (src/models/*_model.py).
+    Falls back to the hand-coded heuristics (_estimate_win_prob, **1.4,
+    RS/G vs posted total) whenever the model row is unavailable for this game.
     """
     home_full = g.get("home_name", "")
     away_full = g.get("away_name", "")
-    home_prob = _estimate_win_prob(home_full, away_full, standings)
+    if model_row is not None:
+        home_prob = float(model_row["pred_home_win_prob"])
+    else:
+        home_prob = _estimate_win_prob(home_full, away_full, standings)
     away_prob = 1.0 - home_prob
     recs: dict = {}
 
@@ -174,8 +252,16 @@ def _build_game_recs(
     else:
         home_favorite = False
 
+    # home_cover_prob = model's P(home wins by 2+ runs). This directly answers
+    # "does home cover −1.5" but NOT "does away cover −1.5" (that would need
+    # P(away wins by 2+), a different, unmodeled event — 1 - home_cover_prob
+    # also includes 1-run home wins/losses, which don't cover either side).
+    # So the model is only used in the home-favorite case; the heuristic
+    # covers the away-favorite case until a symmetric model exists.
+    home_cover_prob = float(model_row["pred_home_cover_prob"]) if model_row is not None else None
+
     if home_favorite:
-        home_rl = home_prob ** 1.4
+        home_rl = home_cover_prob if home_cover_prob is not None else home_prob ** 1.4
         away_rl = 1.0 - home_rl
         home_pick = f"{_short(home_full)} −1.5"
         away_pick = f"{_short(away_full)} +1.5"
@@ -227,10 +313,14 @@ def _build_game_recs(
     un_raw   = espn_game.get("under_odds")
     if ou_raw and ov_raw and un_raw:
         try:
-            posted    = float(ou_raw)
-            exp_total = _get_rs_g(home_full, hist_stnd) + _get_rs_g(away_full, hist_stnd)
-            diff      = exp_total - posted
-            over_prob = max(0.20, min(0.80, 0.50 + diff * 0.06))
+            posted = float(ou_raw)
+            if model_row is not None:
+                exp_total  = float(model_row["model_exp_total"])
+                over_prob  = float(model_row["pred_over_prob"])
+            else:
+                exp_total  = _get_rs_g(home_full, hist_stnd) + _get_rs_g(away_full, hist_stnd)
+                diff       = exp_total - posted
+                over_prob  = max(0.20, min(0.80, 0.50 + diff * 0.06))
             under_prob = 1.0 - over_prob
 
             def _parse(raw) -> int | None:
@@ -331,6 +421,7 @@ def home_page() -> None:
     standings     = _fetch_team_standings()
     espn_odds     = _fetch_espn_odds()
     model_results = _load_model_results()
+    model_preds   = _load_model_predictions()
     _pre          = _load_precomputed()
     hist_stnd     = _pre["standings"]
     init_session_state()
@@ -358,10 +449,12 @@ def home_page() -> None:
         st.info("No MLB games scheduled today, or the MLB Stats API is unreachable.")
     else:
         st.markdown(f"### 🎯 Today's Games & Betting Recommendations")
+        _model_caption = (
+            "trained XGBoost models" if not model_preds.empty
+            else "current-season heuristics (model features unavailable today)"
+        )
         st.caption(
-            "Win probability: current-season W% logistic model (+4% HFA). "
-            "Run line: empirical cover-rate model. "
-            "O/U: historical RS/G vs posted total. "
+            f"Win probability, run line &amp; O/U: {_model_caption}. "
             "✅ BET = edge > 3% &nbsp;·&nbsp; ➡ LEAN = 0–3% &nbsp;·&nbsp; ⛔ PASS = negative edge."
         )
 
@@ -397,8 +490,12 @@ def home_page() -> None:
 
             hk = home_full.split()[-1].lower()
             espn_game = next((eo for eo in espn_odds if hk in eo.get("home_team", "").lower()), None)
-            recs      = _build_game_recs(g, espn_game, standings, hist_stnd)
-            home_prob = _estimate_win_prob(home_full, away_full, standings)
+            model_row = _get_model_row(model_preds, home_full, away_full)
+            recs      = _build_game_recs(g, espn_game, standings, hist_stnd, model_row)
+            home_prob = (
+                float(model_row["pred_home_win_prob"]) if model_row is not None
+                else _estimate_win_prob(home_full, away_full, standings)
+            )
 
             with st.container(border=True):
                 # ── Game header ──
