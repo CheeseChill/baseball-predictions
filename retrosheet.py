@@ -369,7 +369,125 @@ def season_standings(min_year: int = MODERN_START, max_year: int = datetime.date
 
 
 @st.cache_data(show_spinner=False)
-def head_to_head(team_a: str, team_b: str, min_year: int = MODERN_START, max_year: int = datetime.date.today().year) -> pd.DataFrame:
+def expanding_team_stats(min_year: int = MODERN_START, max_year: int = datetime.date.today().year) -> pd.DataFrame:
+    """Point-in-time team stats: one row per (gid, team), computed using only
+    games strictly BEFORE this game within the same season.
+
+    This is the leak-free counterpart to season_standings() /
+    season_team_pitching() / season_team_batting(), which aggregate the
+    FULL season (including games after the one being predicted) — fine for
+    display/leaderboard pages, but a lookahead-bias problem when used as
+    model training features (see features.py module docstring).
+
+    Early in a season (few/no prior games), falls back to the team's full
+    PRIOR season stats, same fallback philosophy already used in
+    today_features.py for live (unplayed) games.
+
+    Returns columns: gid, team, season,
+      WPct, PythWPct, RS_per_G, RA_per_G, RD_per_G,
+      ERA, WHIP, K9, BA, SLG, games_played_prior
+    """
+    gi = load_gameinfo(min_year, max_year)[
+        ["gid", "date", "season", "hometeam", "visteam", "hruns", "vruns", "wteam", "lteam"]
+    ].dropna(subset=["date"])
+
+    # long format: one row per team per game, with that game's own box score
+    vis = gi.rename(columns={"visteam": "team", "vruns": "RS", "hruns": "RA"})[
+        ["gid", "date", "season", "team", "RS", "RA", "wteam", "lteam"]
+    ].copy()
+    hom = gi.rename(columns={"hometeam": "team", "hruns": "RS", "vruns": "RA"})[
+        ["gid", "date", "season", "team", "RS", "RA", "wteam", "lteam"]
+    ].copy()
+    long = pd.concat([vis, hom], ignore_index=True)
+    long["W"] = (long["team"] == long["wteam"]).astype(int)
+    long["L"] = (long["team"] == long["lteam"]).astype(int)
+    long = long.drop(columns=["wteam", "lteam"])
+
+    # per-game batting/pitching box score components (from teamstats, one row
+    # per team per game already)
+    ts = load_teamstats(min_year, max_year)[
+        ["gid", "team", "b_ab", "b_h", "b_d", "b_t", "b_hr",
+         "p_ipouts", "p_h", "p_er", "p_w", "p_k"]
+    ].rename(columns={
+        "b_ab": "AB", "b_h": "H", "b_d": "D2", "b_t": "D3", "b_hr": "HR",
+        "p_ipouts": "IPouts", "p_h": "HA", "p_er": "ER", "p_w": "BB", "p_k": "SO",
+    })
+
+    long = long.merge(ts, on=["gid", "team"], how="left")
+
+    # sort so cumsum accumulates in chronological order within each team-season
+    long = long.sort_values(["season", "team", "date", "gid"]).reset_index(drop=True)
+
+    cum_cols = ["W", "L", "RS", "RA", "AB", "H", "D2", "D3", "HR", "IPouts", "HA", "ER", "BB", "SO"]
+    long[cum_cols] = long[cum_cols].fillna(0)
+    grp = long.groupby(["season", "team"], sort=False)
+    cum_inclusive = grp[cum_cols].cumsum()
+    # subtract the current game's own line so each row reflects stats
+    # entering this game, not including it
+    prior = cum_inclusive - long[cum_cols]
+    prior.columns = [f"prior_{c}" for c in cum_cols]
+    long = pd.concat([long, prior], axis=1)
+
+    g = long["prior_W"] + long["prior_L"]
+    long["games_played_prior"] = g
+    g_safe = g.where(g > 0)
+    long["WPct"] = (long["prior_W"] / g_safe).round(3)
+    long["RS_per_G"] = (long["prior_RS"] / g_safe).round(2)
+    long["RA_per_G"] = (long["prior_RA"] / g_safe).round(2)
+    long["RD_per_G"] = long["RS_per_G"] - long["RA_per_G"]
+    long["PythWPct"] = (
+        long["prior_RS"] ** 2 / (long["prior_RS"] ** 2 + long["prior_RA"] ** 2)
+    ).round(3)
+
+    ip_safe = (long["prior_IPouts"] / 3).where(long["prior_IPouts"] > 0)
+    long["ERA"] = (9 * long["prior_ER"] / ip_safe).round(2)
+    long["WHIP"] = ((long["prior_HA"] + long["prior_BB"]) / ip_safe).round(3)
+    long["K9"] = (9 * long["prior_SO"] / ip_safe).round(2)
+
+    ab_safe = long["prior_AB"].where(long["prior_AB"] > 0)
+    singles = long["prior_H"] - long["prior_D2"] - long["prior_D3"] - long["prior_HR"]
+    long["BA"] = (long["prior_H"] / ab_safe).round(3)
+    long["SLG"] = (
+        (singles + 2 * long["prior_D2"] + 3 * long["prior_D3"] + 4 * long["prior_HR"]) / ab_safe
+    ).round(3)
+
+    out_cols = [
+        "gid", "team", "season", "games_played_prior",
+        "WPct", "PythWPct", "RS_per_G", "RA_per_G", "RD_per_G",
+        "ERA", "WHIP", "K9", "BA", "SLG",
+    ]
+    out = long[out_cols].copy()
+
+    # Early-season fallback: fill NaN rows (games_played_prior == 0, or too
+    # few games for a stable rate stat) with the team's full PRIOR season.
+    prior_season_stats = season_standings(min_year, max_year)[
+        ["season", "team", "WPct", "PythWPct", "RS_per_G", "RA_per_G", "RD_per_G"]
+    ].merge(
+        season_team_pitching(min_year, max_year)[["season", "team", "ERA", "WHIP", "K9"]],
+        on=["season", "team"], how="left",
+    ).merge(
+        season_team_batting(min_year, max_year)[["season", "team", "BA", "SLG"]],
+        on=["season", "team"], how="left",
+    )
+    prior_season_stats = prior_season_stats.copy()
+    prior_season_stats["season"] = prior_season_stats["season"] + 1  # shift fwd 1 yr
+    prior_season_stats = prior_season_stats.rename(
+        columns={c: f"{c}_prevseason" for c in prior_season_stats.columns if c not in ("season", "team")}
+    )
+
+    out = out.merge(prior_season_stats, on=["season", "team"], how="left")
+    FILL_THRESHOLD = 10  # fewer than this many prior games -> use last season
+    low_sample = out["games_played_prior"] < FILL_THRESHOLD
+    for col in ["WPct", "PythWPct", "RS_per_G", "RA_per_G", "RD_per_G", "ERA", "WHIP", "K9", "BA", "SLG"]:
+        prev_col = f"{col}_prevseason"
+        out.loc[low_sample, col] = out.loc[low_sample, col].fillna(out.loc[low_sample, prev_col])
+        out[col] = out[col].fillna(out[prev_col])  # still-missing (no prior season either) -> best effort
+    out = out.drop(columns=[c for c in out.columns if c.endswith("_prevseason")])
+
+    return out
+
+
+
     """All games between two franchises in the date window."""
     gi = load_gameinfo(min_year, max_year)
     mask = (

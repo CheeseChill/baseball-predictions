@@ -30,9 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from retrosheet import (
     load_gameinfo,
-    season_standings,
-    season_team_pitching,
-    season_team_batting,
+    expanding_team_stats,
 )
 from src.models.extra_features import (
     rest_days_features,
@@ -286,23 +284,11 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
     # ── 1. Load raw game info ────────────────────────────────────────────────
     gi = load_gameinfo(min_year, max_year)
 
-    # ── 2. Season-level team stats ───────────────────────────────────────────
-    stnd = season_standings(min_year, max_year)[
-        ["season", "team", "WPct", "PythWPct",
-         "RS_per_G", "RA_per_G", "RD_per_G"]
+    # ── 2. Point-in-time team stats (leak-free: only games BEFORE this one) ──
+    team_stats = expanding_team_stats(min_year, max_year)[
+        ["gid", "team", "WPct", "PythWPct", "RS_per_G", "RA_per_G", "RD_per_G",
+         "ERA", "WHIP", "K9", "BA", "SLG"]
     ]
-    tpitch = season_team_pitching(min_year, max_year)[
-        ["season", "team", "ERA", "WHIP", "K9"]
-    ]
-    tbat = season_team_batting(min_year, max_year)[
-        ["season", "team", "BA", "SLG"]
-    ]
-
-    team_stats = (
-        stnd
-        .merge(tpitch, on=["season", "team"], how="left")
-        .merge(tbat,   on=["season", "team"], how="left")
-    )
 
     # ── 3. Join home team stats ──────────────────────────────────────────────
     home_stats = team_stats.rename(
@@ -328,8 +314,8 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
 
     feat = (
         gi
-        .merge(home_stats, on=["season", "hometeam"], how="left")
-        .merge(away_stats, on=["season", "visteam"],  how="left")
+        .merge(home_stats, on=["gid", "hometeam"], how="left")
+        .merge(away_stats, on=["gid", "visteam"],  how="left")
     )
 
     # ── 4. Differential features ─────────────────────────────────────────────
