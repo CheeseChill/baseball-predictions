@@ -28,12 +28,15 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from . import model_io
 from .features import MONEYLINE_FEATURES, implied_probability, calculate_edge
 
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
-MODEL_PATH = MODEL_DIR / "moneyline_xgb_v1.joblib"
+# Stem (no extension) — model_io writes "<stem>.scaler.joblib" +
+# "<stem>.xgb.json" for portability across Python/OS versions.
+MODEL_PATH = MODEL_DIR / "moneyline_xgb_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +113,7 @@ def train_moneyline_model(
     test_df["pred_win"]  = y_pred
     test_df["correct"]   = (test_df["pred_win"] == test_df["home_win"]).astype(int)
 
-    joblib.dump(model, MODEL_PATH)
+    model_io.save_pipeline(model, MODEL_PATH)
 
     return {
         "model":        model,
@@ -121,6 +124,21 @@ def train_moneyline_model(
         "train_size":   len(X_train),
         "test_size":    len(X_test),
     }
+
+
+def _load_model(path: "str | Path") -> Pipeline:
+    """Load a saved model, preferring the portable model_io format.
+
+    Accepts either a stem (e.g. "models/moneyline_xgb_v1") or a legacy
+    ".joblib" path — either way, if a portable model exists at that stem
+    it is used. Only falls back to a raw joblib.load() for old-style
+    monolithic files that predate model_io.
+    """
+    path = Path(path)
+    stem = path.with_suffix("") if path.suffix == ".joblib" else path
+    if model_io.is_portable_model(stem):
+        return model_io.load_pipeline(stem)
+    return joblib.load(path)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +167,7 @@ def predict_moneyline(
         pred_away_win_prob, pick, [edge_home, edge_away] if odds provided.
     """
     if not isinstance(model_or_path, Pipeline):
-        model_or_path = joblib.load(model_or_path)
+        model_or_path = _load_model(model_or_path)
 
     X = game_features[feature_cols].fillna(0).values
     probs_home = model_or_path.predict_proba(X)[:, 1]
