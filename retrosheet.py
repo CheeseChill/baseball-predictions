@@ -487,7 +487,8 @@ def expanding_team_stats(min_year: int = MODERN_START, max_year: int = datetime.
     return out
 
 
-
+@st.cache_data(show_spinner=False)
+def head_to_head(team_a: str, team_b: str, min_year: int = MODERN_START, max_year: int = datetime.date.today().year) -> pd.DataFrame:
     """All games between two franchises in the date window."""
     gi = load_gameinfo(min_year, max_year)
     mask = (
