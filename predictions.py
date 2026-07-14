@@ -176,12 +176,18 @@ def _build_game_recs(
 ) -> dict:
     """
     Build moneyline / run-line / over-under recommendations for one game.
-    Returns dict with optional keys 'ml', 'rl', 'ou'.
+    Returns dict with optional keys 'ml', 'rl', 'ou', plus a matching
+    'ml_source' / 'rl_source' / 'ou_source' ("model" or "heuristic") for
+    each market that was computed, so the UI can show which one produced
+    that number instead of only reporting pipeline-wide success/failure.
 
     model_row, when present, carries pred_home_win_prob / pred_home_cover_prob /
     pred_over_prob from the trained XGBoost models (src/models/*_model.py).
     Falls back to the hand-coded heuristics (_estimate_win_prob, **1.4,
-    RS/G vs posted total) whenever the model row is unavailable for this game.
+    RS/G vs posted total) whenever the model row is unavailable for this game,
+    and — for the run line specifically — whenever the away team is the
+    favorite (the model currently only predicts P(home covers -1.5), so
+    there's no model-backed number for the away-favorite case yet).
     """
     home_full = g.get("home_name", "")
     away_full = g.get("away_name", "")
@@ -221,6 +227,7 @@ def _build_game_recs(
                 },
                 "best": "home" if (home_prob - impl_h) >= (away_prob - impl_a) else "away",
             }
+            recs["ml_source"] = "model" if model_row is not None else "heuristic"
         except (TypeError, ValueError):
             pass
 
@@ -304,6 +311,7 @@ def _build_game_recs(
                 },
                 "best": "home" if (home_rl - impl_h) >= (away_rl - impl_a) else "away",
             }
+            recs["rl_source"] = "model" if (model_row is not None and home_favorite) else "heuristic"
         except (TypeError, ValueError):
             pass
 
@@ -358,6 +366,7 @@ def _build_game_recs(
                 },
                 "best": "over" if (over_prob - impl_ov) >= (under_prob - impl_un) else "under",
             }
+            recs["ou_source"] = "model" if model_row is not None else "heuristic"
         except (TypeError, ValueError):
             pass
 
@@ -455,6 +464,7 @@ def home_page() -> None:
         )
         st.caption(
             f"Win probability, run line &amp; O/U: {_model_caption}. "
+            "Each market below is tagged 🤖 Model or 📐 Heuristic. "
             "✅ BET = edge > 3% &nbsp;·&nbsp; ➡ LEAN = 0–3% &nbsp;·&nbsp; ⛔ PASS = negative edge."
         )
 
@@ -525,6 +535,11 @@ def home_page() -> None:
                 # ── Three bet markets ──
                 col_ml, col_rl, col_ou = st.columns(3)
 
+                _source_badge = {
+                    "model":     "🤖 Model",
+                    "heuristic": "📐 Heuristic",
+                }
+
                 with col_ml:
                     st.markdown("##### 💵 Moneyline")
                     if "ml" in recs:
@@ -533,6 +548,7 @@ def home_page() -> None:
                         side = ml[best]
                         other = ml["away" if best == "home" else "home"]
                         exp   = f"Est: {side['est_prob']:.0%} · Impl: {side['impl']:.0%}"
+                        st.caption(_source_badge.get(recs.get("ml_source"), ""))
                         st.markdown(_rec_card_html("ML", side, exp), unsafe_allow_html=True)
                         st.caption(
                             f"Other side: {_short(other['team'])} {other['odds_str']} "
@@ -549,6 +565,7 @@ def home_page() -> None:
                         side = rl[best]
                         other = rl["away" if best == "home" else "home"]
                         exp   = f"Est cover: {side['est_prob']:.0%} · Impl: {side['impl']:.0%}"
+                        st.caption(_source_badge.get(recs.get("rl_source"), ""))
                         st.markdown(_rec_card_html("RL", side, exp), unsafe_allow_html=True)
                         st.caption(
                             f"Other side: {other['pick']} "
@@ -569,6 +586,7 @@ def home_page() -> None:
                             f"Posted: {ou['posted']} · "
                             f"Impl: {side['impl']:.0%}"
                         )
+                        st.caption(_source_badge.get(recs.get("ou_source"), ""))
                         st.markdown(_rec_card_html("OU", side, exp), unsafe_allow_html=True)
                         st.caption(
                             f"Other side: {other['pick'].strip()} {other['odds_str']} "

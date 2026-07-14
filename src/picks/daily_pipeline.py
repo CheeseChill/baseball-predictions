@@ -99,7 +99,7 @@ def run_daily_pipeline(target_date: Optional[date] = None) -> dict:
     )
 
     totals_preds = predict_totals(
-        model_or_path=MODEL_DIR / "totals_lgbm_v1.joblib",
+        model_or_path=MODEL_DIR / "totals_xgb_v1.joblib",
         game_features=features,
         over_price_col="over_price",
         under_price_col="under_price",
