@@ -60,7 +60,11 @@ def is_portable_model(stem: "str | Path") -> bool:
     return _xgb_path(stem).exists()
 
 
-def save_pipeline(pipeline: Pipeline, stem: "str | Path") -> None:
+def save_pipeline(
+    pipeline: Pipeline,
+    stem: "str | Path",
+    feature_cols: "list[str] | None" = None,
+) -> None:
     """Save a Pipeline whose LAST step is an XGBClassifier, portably.
 
     Args:
@@ -69,6 +73,15 @@ def save_pipeline(pipeline: Pipeline, stem: "str | Path") -> None:
         stem: Path without extension, e.g. MODEL_DIR / "moneyline_xgb_v1".
             Three files are written: "<stem>.scaler.joblib",
             "<stem>.xgb.json", "<stem>.meta.json".
+        feature_cols: The exact, ordered list of feature columns the
+            pipeline was fit on. Training filters the "full" feature list
+            down to whatever columns actually exist in that run's data
+            (e.g. 99 out of 121 when some Savant columns are missing), so
+            this is NOT always the same as a module-level FEATURES
+            constant. Saving it here lets predict-time code rebuild the
+            exact same column set instead of guessing — a mismatch here
+            raises "X has N features, but StandardScaler is expecting M
+            features as input".
     """
     stem = Path(stem)
     stem.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +101,16 @@ def save_pipeline(pipeline: Pipeline, stem: "str | Path") -> None:
     clf.save_model(str(_xgb_path(stem)))
 
     with open(_meta_path(stem), "w") as f:
-        json.dump({"clf_step_name": clf_name}, f)
+        json.dump({"clf_step_name": clf_name, "feature_cols": feature_cols}, f)
+
+
+def load_feature_cols(stem: "str | Path") -> "list[str] | None":
+    """Return the feature_cols saved alongside this model, if any."""
+    meta_path = _meta_path(stem)
+    if not meta_path.exists():
+        return None
+    with open(meta_path) as f:
+        return json.load(f).get("feature_cols")
 
 
 def load_pipeline(stem: "str | Path") -> Pipeline:

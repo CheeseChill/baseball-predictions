@@ -140,7 +140,7 @@ def train_totals_model(
         # Portable format — model_io writes "<stem>.scaler.joblib" +
         # "<stem>.xgb.json".
         model_path = MODEL_DIR / f"totals_{suffix}_v1"
-        model_io.save_pipeline(model, model_path)
+        model_io.save_pipeline(model, model_path, feature_cols=feature_cols)
     else:
         # LightGBM isn't handled by model_io yet — unchanged for now.
         # (Note: this "totals_lgbm_v1.joblib" path is also the one
@@ -160,17 +160,20 @@ def train_totals_model(
     }
 
 
-def _load_model(path: "str | Path") -> Pipeline:
+def _load_model(path: "str | Path") -> tuple[Pipeline, "list[str] | None"]:
     """Load a saved model, preferring the portable model_io format.
 
-    Only applies to the XGBoost branch — LightGBM models still load via
-    plain joblib.load() since model_io only supports XGBClassifier.
+    Only the XGBoost branch is portable — LightGBM models still load via
+    plain joblib.load() (and have no saved feature_cols) since model_io
+    only supports XGBClassifier.
+
+    Returns (pipeline, feature_cols).
     """
     path = Path(path)
     stem = path.with_suffix("") if path.suffix == ".joblib" else path
     if model_io.is_portable_model(stem):
-        return model_io.load_pipeline(stem)
-    return joblib.load(path)
+        return model_io.load_pipeline(stem), model_io.load_feature_cols(stem)
+    return joblib.load(path), None
 
 
 # ---------------------------------------------------------------------------
@@ -180,16 +183,20 @@ def _load_model(path: "str | Path") -> Pipeline:
 def predict_totals(
     model_or_path: "Pipeline | str | Path",
     game_features: pd.DataFrame,
-    feature_cols: list[str] = TOTALS_FEATURES,
+    feature_cols: "list[str] | None" = None,
     over_price_col: str | None = None,
     under_price_col: str | None = None,
 ) -> pd.DataFrame:
     """Generate Over/Under predictions for a set of games.
 
     Args:
-        model_or_path: Trained pipeline or path to saved .joblib file.
+        model_or_path: Trained pipeline or path to saved model.
         game_features: DataFrame containing feature_cols.
-        feature_cols:  Feature columns expected by the model.
+        feature_cols:  Feature columns expected by the model. Defaults to
+                       None, which uses the exact column list the model
+                       was trained on (from saved metadata), falling back
+                       to TOTALS_FEATURES only if unavailable (e.g. the
+                       LightGBM branch, which isn't tracked by model_io).
         over_price_col:  Optional American odds for the Over.
         under_price_col: Optional American odds for the Under.
 
@@ -197,8 +204,12 @@ def predict_totals(
         DataFrame with: hometeam, visteam, exp_total, pred_prob_over,
         pred_prob_under, pick_side, pick_prob, [edge] if odds provided.
     """
+    trained_feature_cols = None
     if not isinstance(model_or_path, Pipeline):
-        model_or_path = _load_model(model_or_path)
+        model_or_path, trained_feature_cols = _load_model(model_or_path)
+
+    if feature_cols is None:
+        feature_cols = trained_feature_cols or TOTALS_FEATURES
 
     X = game_features[feature_cols].fillna(0).values
     probs_over = model_or_path.predict_proba(X)[:, 1]
