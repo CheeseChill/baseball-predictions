@@ -60,15 +60,22 @@ def fetch_all_schedules() -> pd.DataFrame:
     return combined
 
 
-def fetch_todays_probable_pitchers() -> pd.DataFrame:
-    """Fetch today's games with probable pitchers (for daily picks)."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    games = statsapi.schedule(date=today)
+def fetch_todays_probable_pitchers(target_date: str | None = None) -> pd.DataFrame:
+    """Fetch a day's games with probable pitchers (for daily picks).
+
+    target_date: 'YYYY-MM-DD' string. Defaults to today. Passing a past
+    date lets you smoke-test the pipeline against a real completed game
+    day (e.g. to verify the feature/model pipeline end-to-end without
+    waiting for the next live slate — useful right after the All-Star
+    break, or after any change to today_features.py / the models).
+    """
+    target_date = target_date or datetime.now().strftime("%Y-%m-%d")
+    games = statsapi.schedule(date=target_date)
     rows = []
     for g in games:
         rows.append({
             "game_id": g["game_id"],
-            "date": today,
+            "date": target_date,
             "away_team": g["away_name"],
             "home_team": g["home_name"],
             "away_probable_pitcher": g.get("away_probable_pitcher", "TBD"),
