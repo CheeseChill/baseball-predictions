@@ -27,12 +27,15 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from . import model_io
 from .features import SPREAD_FEATURES, implied_probability, calculate_edge
 
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
-MODEL_PATH = MODEL_DIR / "spread_xgb_v1.joblib"
+# Stem (no extension) — model_io writes "<stem>.scaler.joblib" +
+# "<stem>.xgb.json" for portability across Python/OS versions.
+MODEL_PATH = MODEL_DIR / "spread_xgb_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +115,7 @@ def train_spread_model(
     test_df["correct"] = (test_df["pred_cover"] == test_df["home_cover"]).astype(int)
     test_df["home_margin"] = test_df["hruns"] - test_df["vruns"]
 
-    joblib.dump(model, MODEL_PATH)
+    model_io.save_pipeline(model, MODEL_PATH)
 
     return {
         "model":        model,
@@ -123,6 +126,15 @@ def train_spread_model(
         "train_size":   len(X_train),
         "test_size":    len(X_test),
     }
+
+
+def _load_model(path: "str | Path") -> Pipeline:
+    """Load a saved model, preferring the portable model_io format."""
+    path = Path(path)
+    stem = path.with_suffix("") if path.suffix == ".joblib" else path
+    if model_io.is_portable_model(stem):
+        return model_io.load_pipeline(stem)
+    return joblib.load(path)
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +160,7 @@ def predict_spread(
         [edge] if odds provided.
     """
     if not isinstance(model_or_path, Pipeline):
-        model_or_path = joblib.load(model_or_path)
+        model_or_path = _load_model(model_or_path)
 
     X = game_features[feature_cols].fillna(0).values
     probs_cover = model_or_path.predict_proba(X)[:, 1]

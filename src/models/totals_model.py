@@ -33,6 +33,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from . import model_io
 from .features import TOTALS_FEATURES, implied_probability
 
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
@@ -135,8 +136,17 @@ def train_totals_model(
         (test_df["pick_side"] == "Over")  == (test_df["went_over"] == 1)
     ).astype(int)
 
-    model_path = MODEL_DIR / f"totals_{suffix}_v1.joblib"
-    joblib.dump(model, model_path)
+    if suffix == "xgb":
+        # Portable format — model_io writes "<stem>.scaler.joblib" +
+        # "<stem>.xgb.json".
+        model_path = MODEL_DIR / f"totals_{suffix}_v1"
+        model_io.save_pipeline(model, model_path)
+    else:
+        # LightGBM isn't handled by model_io yet — unchanged for now.
+        # (Note: this "totals_lgbm_v1.joblib" path is also the one
+        # referenced by a known, separate path bug in daily_pipeline.py.)
+        model_path = MODEL_DIR / f"totals_{suffix}_v1.joblib"
+        joblib.dump(model, model_path)
 
     return {
         "model":        model,
@@ -148,6 +158,19 @@ def train_totals_model(
         "test_size":    len(X_test),
         "model_path":   model_path,
     }
+
+
+def _load_model(path: "str | Path") -> Pipeline:
+    """Load a saved model, preferring the portable model_io format.
+
+    Only applies to the XGBoost branch — LightGBM models still load via
+    plain joblib.load() since model_io only supports XGBClassifier.
+    """
+    path = Path(path)
+    stem = path.with_suffix("") if path.suffix == ".joblib" else path
+    if model_io.is_portable_model(stem):
+        return model_io.load_pipeline(stem)
+    return joblib.load(path)
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +198,7 @@ def predict_totals(
         pred_prob_under, pick_side, pick_prob, [edge] if odds provided.
     """
     if not isinstance(model_or_path, Pipeline):
-        model_or_path = joblib.load(model_or_path)
+        model_or_path = _load_model(model_or_path)
 
     X = game_features[feature_cols].fillna(0).values
     probs_over = model_or_path.predict_proba(X)[:, 1]
