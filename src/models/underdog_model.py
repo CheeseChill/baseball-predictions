@@ -113,7 +113,7 @@ def train_moneyline_model(
     test_df["pred_win"]  = y_pred
     test_df["correct"]   = (test_df["pred_win"] == test_df["home_win"]).astype(int)
 
-    model_io.save_pipeline(model, MODEL_PATH)
+    model_io.save_pipeline(model, MODEL_PATH, feature_cols=feature_cols)
 
     return {
         "model":        model,
@@ -126,19 +126,23 @@ def train_moneyline_model(
     }
 
 
-def _load_model(path: "str | Path") -> Pipeline:
+def _load_model(path: "str | Path") -> tuple[Pipeline, "list[str] | None"]:
     """Load a saved model, preferring the portable model_io format.
 
     Accepts either a stem (e.g. "models/moneyline_xgb_v1") or a legacy
     ".joblib" path — either way, if a portable model exists at that stem
     it is used. Only falls back to a raw joblib.load() for old-style
     monolithic files that predate model_io.
+
+    Returns (pipeline, feature_cols) — feature_cols is the exact column
+    list the model was trained on (from the saved metadata), or None if
+    unavailable (legacy files, or Pipeline passed in directly).
     """
     path = Path(path)
     stem = path.with_suffix("") if path.suffix == ".joblib" else path
     if model_io.is_portable_model(stem):
-        return model_io.load_pipeline(stem)
-    return joblib.load(path)
+        return model_io.load_pipeline(stem), model_io.load_feature_cols(stem)
+    return joblib.load(path), None
 
 
 # ---------------------------------------------------------------------------
@@ -148,16 +152,22 @@ def _load_model(path: "str | Path") -> Pipeline:
 def predict_moneyline(
     model_or_path: "Pipeline | str | Path",
     game_features: pd.DataFrame,
-    feature_cols: list[str] = MONEYLINE_FEATURES,
+    feature_cols: "list[str] | None" = None,
     home_ml_col: str | None = None,
     away_ml_col: str | None = None,
 ) -> pd.DataFrame:
     """Generate moneyline win-probability predictions for a set of games.
 
     Args:
-        model_or_path: Trained pipeline or path to a saved .joblib file.
+        model_or_path: Trained pipeline or path to a saved model.
         game_features: DataFrame containing feature_cols and identifier columns.
-        feature_cols:  Feature columns expected by the model.
+        feature_cols:  Feature columns expected by the model. Defaults to
+                       None, which uses the exact column list the model
+                       was trained on (saved in its metadata) — falling
+                       back to MONEYLINE_FEATURES only if that's
+                       unavailable (e.g. legacy model file, or a bare
+                       Pipeline passed in directly). Passing this
+                       explicitly overrides that.
         home_ml_col:   Optional column with home moneyline (American odds).
                        If provided, edge vs. the line is computed.
         away_ml_col:   Optional column with away moneyline.
@@ -166,8 +176,12 @@ def predict_moneyline(
         DataFrame with columns: hometeam, visteam, pred_home_win_prob,
         pred_away_win_prob, pick, [edge_home, edge_away] if odds provided.
     """
+    trained_feature_cols = None
     if not isinstance(model_or_path, Pipeline):
-        model_or_path = _load_model(model_or_path)
+        model_or_path, trained_feature_cols = _load_model(model_or_path)
+
+    if feature_cols is None:
+        feature_cols = trained_feature_cols or MONEYLINE_FEATURES
 
     X = game_features[feature_cols].fillna(0).values
     probs_home = model_or_path.predict_proba(X)[:, 1]

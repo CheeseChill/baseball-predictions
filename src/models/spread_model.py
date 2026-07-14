@@ -115,7 +115,7 @@ def train_spread_model(
     test_df["correct"] = (test_df["pred_cover"] == test_df["home_cover"]).astype(int)
     test_df["home_margin"] = test_df["hruns"] - test_df["vruns"]
 
-    model_io.save_pipeline(model, MODEL_PATH)
+    model_io.save_pipeline(model, MODEL_PATH, feature_cols=feature_cols)
 
     return {
         "model":        model,
@@ -128,13 +128,17 @@ def train_spread_model(
     }
 
 
-def _load_model(path: "str | Path") -> Pipeline:
-    """Load a saved model, preferring the portable model_io format."""
+def _load_model(path: "str | Path") -> tuple[Pipeline, "list[str] | None"]:
+    """Load a saved model, preferring the portable model_io format.
+
+    Returns (pipeline, feature_cols) — feature_cols is the exact column
+    list the model was trained on, or None if unavailable.
+    """
     path = Path(path)
     stem = path.with_suffix("") if path.suffix == ".joblib" else path
     if model_io.is_portable_model(stem):
-        return model_io.load_pipeline(stem)
-    return joblib.load(path)
+        return model_io.load_pipeline(stem), model_io.load_feature_cols(stem)
+    return joblib.load(path), None
 
 
 # ---------------------------------------------------------------------------
@@ -144,23 +148,30 @@ def _load_model(path: "str | Path") -> Pipeline:
 def predict_spread(
     model_or_path: "Pipeline | str | Path",
     game_features: pd.DataFrame,
-    feature_cols: list[str] = SPREAD_FEATURES,
+    feature_cols: "list[str] | None" = None,
     spread_price_col: str | None = None,
 ) -> pd.DataFrame:
     """Generate run-line cover predictions for a set of games.
 
     Args:
-        model_or_path: Trained pipeline or path to a saved .joblib file.
+        model_or_path: Trained pipeline or path to a saved model.
         game_features: DataFrame containing feature_cols.
-        feature_cols:  Feature columns expected by the model.
+        feature_cols:  Feature columns expected by the model. Defaults to
+                       None, which uses the exact column list the model
+                       was trained on (from saved metadata), falling back
+                       to SPREAD_FEATURES only if unavailable.
         spread_price_col: Optional column with American odds for the -1.5 line.
 
     Returns:
         DataFrame with: hometeam, visteam, pred_cover_prob, pick_side,
         [edge] if odds provided.
     """
+    trained_feature_cols = None
     if not isinstance(model_or_path, Pipeline):
-        model_or_path = _load_model(model_or_path)
+        model_or_path, trained_feature_cols = _load_model(model_or_path)
+
+    if feature_cols is None:
+        feature_cols = trained_feature_cols or SPREAD_FEATURES
 
     X = game_features[feature_cols].fillna(0).values
     probs_cover = model_or_path.predict_proba(X)[:, 1]
