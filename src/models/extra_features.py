@@ -140,6 +140,82 @@ def _load_gameinfo_csv(min_year: int, max_year: int,
 
 
 # ---------------------------------------------------------------------------
+# Point-in-time helpers (avoid lookahead bias)
+#
+# Same pattern as retrosheet.expanding_team_stats(): cumulative sum minus the
+# current row's own value = sum of STRICTLY PRIOR games in that (season, team)
+# group. Early-season rows (< FILL_THRESHOLD prior games) fall back to the
+# team's full PRIOR season rate — using a fully completed past season is not
+# lookahead, since every game in it already happened before the current one.
+# ---------------------------------------------------------------------------
+
+_FILL_THRESHOLD = 10  # fewer than this many prior games this season -> use last season
+
+
+def _expanding_prior_sums(
+    df: pd.DataFrame,
+    group_cols: list[str],
+    value_cols: list[str],
+    date_col: str = "date",
+    tiebreak_col: str = "gid",
+) -> pd.DataFrame:
+    """Point-in-time cumulative sums, excluding the current game.
+
+    Sorts each group_cols group chronologically (date, then tiebreak_col for
+    same-day double-headers) and returns, for every row, the sum of
+    value_cols across all games STRICTLY BEFORE it in that group — the same
+    "cumsum minus self" trick used by retrosheet.expanding_team_stats().
+
+    Returns: gid + group_cols + 'prior_<col>' for each value_col +
+             'games_played_prior'.
+    """
+    d = df.sort_values(group_cols + [date_col, tiebreak_col]).copy()
+    grp = d.groupby(group_cols, sort=False)
+    cum_inclusive = grp[value_cols].cumsum()
+    prior = cum_inclusive - d[value_cols]
+    prior.columns = [f"prior_{c}" for c in value_cols]
+    d = pd.concat([d, prior], axis=1)
+    d["games_played_prior"] = grp.cumcount()
+    keep = list(dict.fromkeys(
+        ["gid"] + group_cols + [f"prior_{c}" for c in value_cols] + ["games_played_prior"]
+    ))
+    return d[keep]
+
+
+def _fill_with_prior_season(
+    df: pd.DataFrame,
+    full_season_stats: pd.DataFrame,
+    team_col: str,
+    value_cols: list[str],
+    min_games: int = _FILL_THRESHOLD,
+    games_col: str = "games_played_prior",
+) -> pd.DataFrame:
+    """Early-season fallback: fill low-sample rows with the team's full PRIOR season rate.
+
+    full_season_stats must have one row per (season, team) with value_cols
+    already computed as season-level rates (not point-in-time).
+    """
+    d = df.copy()
+    prev = full_season_stats.rename(columns={"team": team_col}).copy()
+    prev["season"] = prev["season"] + 1  # shift fwd 1 yr, same as expanding_team_stats()
+    prev = prev.rename(columns={c: f"{c}_prevseason" for c in value_cols})
+    d = d.merge(
+        prev[["season", team_col] + [f"{c}_prevseason" for c in value_cols]],
+        on=["season", team_col], how="left",
+    )
+    low_sample = d[games_col] < min_games
+    for c in value_cols:
+        prev_col = f"{c}_prevseason"
+        # Low-sample rows get REPLACED by the prior season's rate (not just
+        # filled when NaN) — a rate computed from < 10 games this season is
+        # noisy even when it isn't literally missing (e.g. 0/1 from clip()).
+        use_prev = low_sample & d[prev_col].notna()
+        d.loc[use_prev, c] = d.loc[use_prev, prev_col]
+        d[c] = d[c].fillna(d[prev_col])  # still-missing (no prior season either) -> best effort
+    return d.drop(columns=[f"{c}_prevseason" for c in value_cols])
+
+
+# ---------------------------------------------------------------------------
 # 3.3 — Rest Days & Doubleheaders
 # ---------------------------------------------------------------------------
 
@@ -184,24 +260,43 @@ def rest_days_features(min_year: int, max_year: int) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def fielding_features(min_year: int, max_year: int) -> pd.DataFrame:
-    """Season-level fielding metrics per team.
+    """Point-in-time fielding metrics per team per game (no lookahead).
 
-    Returns: season, team, errors_per_g, dp_rate, def_efficiency
+    Uses only games strictly BEFORE the current one within the season;
+    early-season games (< 10 prior games) fall back to the team's full
+    PRIOR season rate.
+
+    Returns: gid, team, errors_per_g, dp_rate, def_efficiency
     """
-    ts = _load_teamstats(min_year, max_year)
-    grp = ts.groupby(["season", "team_full"]).agg(
-        games      =("gid",   "count"),
-        total_errors=("d_e",  "sum"),
-        total_dp    =("d_dp", "sum"),
-        total_po    =("d_po", "sum"),
-        total_a     =("d_a",  "sum"),
-    ).reset_index().rename(columns={"team_full": "team"})
-    g = grp["games"].clip(lower=1)
-    grp["errors_per_g"] = (grp["total_errors"] / g).round(3)
-    grp["dp_rate"]      = (grp["total_dp"]      / g).round(3)
-    chances = (grp["total_po"] + grp["total_a"] + grp["total_errors"]).clip(lower=1)
-    grp["def_efficiency"] = ((grp["total_po"] + grp["total_a"]) / chances).round(4)
-    return grp[["season", "team", "errors_per_g", "dp_rate", "def_efficiency"]]
+    warmup = max(min_year - 1, 2015)
+    ts = _load_teamstats(warmup, max_year).drop(columns=["team"]).rename(columns={"team_full": "team"})
+
+    prior = _expanding_prior_sums(
+        ts, group_cols=["season", "team"], value_cols=["d_e", "d_dp", "d_po", "d_a"],
+    )
+    g = prior["games_played_prior"].clip(lower=1)
+    prior["errors_per_g"] = (prior["prior_d_e"] / g).round(3)
+    prior["dp_rate"]      = (prior["prior_d_dp"] / g).round(3)
+    chances = (prior["prior_d_po"] + prior["prior_d_a"] + prior["prior_d_e"]).clip(lower=1)
+    prior["def_efficiency"] = ((prior["prior_d_po"] + prior["prior_d_a"]) / chances).round(4)
+
+    full = ts.groupby(["season", "team"]).agg(
+        games=("gid", "count"), total_e=("d_e", "sum"), total_dp=("d_dp", "sum"),
+        total_po=("d_po", "sum"), total_a=("d_a", "sum"),
+    ).reset_index()
+    fg = full["games"].clip(lower=1)
+    full["errors_per_g"] = (full["total_e"] / fg).round(3)
+    full["dp_rate"]      = (full["total_dp"] / fg).round(3)
+    fchances = (full["total_po"] + full["total_a"] + full["total_e"]).clip(lower=1)
+    full["def_efficiency"] = ((full["total_po"] + full["total_a"]) / fchances).round(4)
+    full_season_stats = full[["season", "team", "errors_per_g", "dp_rate", "def_efficiency"]]
+
+    out = prior[["gid", "season", "team", "errors_per_g", "dp_rate",
+                 "def_efficiency", "games_played_prior"]]
+    out = _fill_with_prior_season(out, full_season_stats, "team",
+                                   ["errors_per_g", "dp_rate", "def_efficiency"])
+    out = out[out["season"] >= min_year]
+    return out[["gid", "team", "errors_per_g", "dp_rate", "def_efficiency"]].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -209,21 +304,35 @@ def fielding_features(min_year: int, max_year: int) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def kb_rate_features(min_year: int, max_year: int) -> pd.DataFrame:
-    """Season K%, BB%, K/BB ratio for each team's batting lineup.
+    """Point-in-time season-to-date K%, BB%, K/BB ratio (no lookahead).
 
-    Returns: season, team, K_rate, BB_rate, K_BB_ratio
+    Returns: gid, team, K_rate, BB_rate, K_BB_ratio
     """
-    ts = _load_teamstats(min_year, max_year)
-    grp = ts.groupby(["season", "team_full"]).agg(
-        total_pa =("b_pa", "sum"),
-        total_k  =("b_k",  "sum"),
-        total_bb =("b_w",  "sum"),
-    ).reset_index().rename(columns={"team_full": "team"})
-    pa = grp["total_pa"].clip(lower=1)
-    grp["K_rate"]     = (grp["total_k"] / pa).round(4)
-    grp["BB_rate"]    = (grp["total_bb"] / pa).round(4)
-    grp["K_BB_ratio"] = (grp["total_k"] / grp["total_bb"].clip(lower=1)).round(3)
-    return grp[["season", "team", "K_rate", "BB_rate", "K_BB_ratio"]]
+    warmup = max(min_year - 1, 2015)
+    ts = _load_teamstats(warmup, max_year).drop(columns=["team"]).rename(columns={"team_full": "team"})
+
+    prior = _expanding_prior_sums(
+        ts, group_cols=["season", "team"], value_cols=["b_pa", "b_k", "b_w"],
+    )
+    pa = prior["prior_b_pa"].clip(lower=1)
+    prior["K_rate"]     = (prior["prior_b_k"] / pa).round(4)
+    prior["BB_rate"]    = (prior["prior_b_w"] / pa).round(4)
+    prior["K_BB_ratio"] = (prior["prior_b_k"] / prior["prior_b_w"].clip(lower=1)).round(3)
+
+    full = ts.groupby(["season", "team"]).agg(
+        total_pa=("b_pa", "sum"), total_k=("b_k", "sum"), total_bb=("b_w", "sum"),
+    ).reset_index()
+    fpa = full["total_pa"].clip(lower=1)
+    full["K_rate"]     = (full["total_k"] / fpa).round(4)
+    full["BB_rate"]    = (full["total_bb"] / fpa).round(4)
+    full["K_BB_ratio"] = (full["total_k"] / full["total_bb"].clip(lower=1)).round(3)
+    full_season_stats = full[["season", "team", "K_rate", "BB_rate", "K_BB_ratio"]]
+
+    out = prior[["gid", "season", "team", "K_rate", "BB_rate", "K_BB_ratio", "games_played_prior"]]
+    out = _fill_with_prior_season(out, full_season_stats, "team",
+                                   ["K_rate", "BB_rate", "K_BB_ratio"])
+    out = out[out["season"] >= min_year]
+    return out[["gid", "team", "K_rate", "BB_rate", "K_BB_ratio"]].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -231,17 +340,29 @@ def kb_rate_features(min_year: int, max_year: int) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def lob_features(min_year: int, max_year: int) -> pd.DataFrame:
-    """Season LOB per game (reads teamstats CSV which has lob column).
+    """Point-in-time season-to-date LOB per game (no lookahead).
 
-    Returns: season, team, lob_per_g
+    Reads teamstats CSV which has the lob column.
+
+    Returns: gid, team, lob_per_g
     """
-    ts = _load_teamstats_csv(min_year, max_year)
-    grp = ts.groupby(["season", "team_full"]).agg(
-        games     =("gid",  "count"),
-        total_lob =("lob",  "sum"),
-    ).reset_index().rename(columns={"team_full": "team"})
-    grp["lob_per_g"] = (grp["total_lob"] / grp["games"].clip(lower=1)).round(2)
-    return grp[["season", "team", "lob_per_g"]]
+    warmup = max(min_year - 1, 2015)
+    ts = _load_teamstats_csv(warmup, max_year).drop(columns=["team"]).rename(columns={"team_full": "team"})
+
+    prior = _expanding_prior_sums(ts, group_cols=["season", "team"], value_cols=["lob"])
+    g = prior["games_played_prior"].clip(lower=1)
+    prior["lob_per_g"] = (prior["prior_lob"] / g).round(2)
+
+    full = ts.groupby(["season", "team"]).agg(
+        games=("gid", "count"), total_lob=("lob", "sum"),
+    ).reset_index()
+    full["lob_per_g"] = (full["total_lob"] / full["games"].clip(lower=1)).round(2)
+    full_season_stats = full[["season", "team", "lob_per_g"]]
+
+    out = prior[["gid", "season", "team", "lob_per_g", "games_played_prior"]]
+    out = _fill_with_prior_season(out, full_season_stats, "team", ["lob_per_g"])
+    out = out[out["season"] >= min_year]
+    return out[["gid", "team", "lob_per_g"]].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -477,20 +598,32 @@ def pythagorean_diff_features(min_year: int, max_year: int) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def baserunning_features(min_year: int, max_year: int) -> pd.DataFrame:
-    """Stolen base success rate and per-game rate.
+    """Point-in-time stolen-base success rate and per-game rate (no lookahead).
 
-    Returns: season, team, sb_success_rate, sb_rate
+    Returns: gid, team, sb_success_rate, sb_rate
     """
-    ts = _load_teamstats(min_year, max_year)
-    grp = ts.groupby(["season", "team_full"]).agg(
-        games    =("gid",  "count"),
-        total_sb =("b_sb", "sum"),
-        total_cs =("b_cs", "sum"),
-    ).reset_index().rename(columns={"team_full": "team"})
-    attempts = (grp["total_sb"] + grp["total_cs"]).clip(lower=1)
-    grp["sb_success_rate"] = (grp["total_sb"] / attempts).round(3)
-    grp["sb_rate"]         = (grp["total_sb"] / grp["games"].clip(lower=1)).round(3)
-    return grp[["season", "team", "sb_success_rate", "sb_rate"]]
+    warmup = max(min_year - 1, 2015)
+    ts = _load_teamstats(warmup, max_year).drop(columns=["team"]).rename(columns={"team_full": "team"})
+
+    prior = _expanding_prior_sums(ts, group_cols=["season", "team"], value_cols=["b_sb", "b_cs"])
+    g = prior["games_played_prior"].clip(lower=1)
+    attempts = (prior["prior_b_sb"] + prior["prior_b_cs"]).clip(lower=1)
+    prior["sb_success_rate"] = (prior["prior_b_sb"] / attempts).round(3)
+    prior["sb_rate"]         = (prior["prior_b_sb"] / g).round(3)
+
+    full = ts.groupby(["season", "team"]).agg(
+        games=("gid", "count"), total_sb=("b_sb", "sum"), total_cs=("b_cs", "sum"),
+    ).reset_index()
+    fattempts = (full["total_sb"] + full["total_cs"]).clip(lower=1)
+    full["sb_success_rate"] = (full["total_sb"] / fattempts).round(3)
+    full["sb_rate"]         = (full["total_sb"] / full["games"].clip(lower=1)).round(3)
+    full_season_stats = full[["season", "team", "sb_success_rate", "sb_rate"]]
+
+    out = prior[["gid", "season", "team", "sb_success_rate", "sb_rate", "games_played_prior"]]
+    out = _fill_with_prior_season(out, full_season_stats, "team",
+                                   ["sb_success_rate", "sb_rate"])
+    out = out[out["season"] >= min_year]
+    return out[["gid", "team", "sb_success_rate", "sb_rate"]].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------

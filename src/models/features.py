@@ -363,7 +363,7 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
     # 3.3 Rest days / doubleheaders
     feat = feat.merge(rest_days_features(min_year, max_year), on="gid", how="left")
 
-    # 4.1 Fielding quality
+    # 4.1 Fielding quality (point-in-time — merge on gid, not season)
     _fld = fielding_features(min_year, max_year)
     for side, team_col in (("home", "hometeam"), ("away", "visteam")):
         tmp = _fld.rename(columns={
@@ -372,9 +372,9 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
             "dp_rate":       f"{side}_dp_rate",
             "def_efficiency": f"{side}_def_efficiency",
         })
-        feat = feat.merge(tmp, on=["season", team_col], how="left")
+        feat = feat.merge(tmp, on=["gid", team_col], how="left")
 
-    # 5.1 K/BB plate discipline
+    # 5.1 K/BB plate discipline (point-in-time — merge on gid, not season)
     _kb = kb_rate_features(min_year, max_year)
     for side, team_col in (("home", "hometeam"), ("away", "visteam")):
         tmp = _kb.rename(columns={
@@ -383,13 +383,13 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
             "BB_rate":   f"{side}_BB_rate",
             "K_BB_ratio": f"{side}_K_BB_ratio",
         })
-        feat = feat.merge(tmp, on=["season", team_col], how="left")
+        feat = feat.merge(tmp, on=["gid", team_col], how="left")
 
     # 5.2 LOB per game
     _lob = lob_features(min_year, max_year)
     for side, team_col in (("home", "hometeam"), ("away", "visteam")):
         tmp = _lob.rename(columns={"team": team_col, "lob_per_g": f"{side}_lob_per_g"})
-        feat = feat.merge(tmp, on=["season", team_col], how="left")
+        feat = feat.merge(tmp, on=["gid", team_col], how="left")
 
     # 6.2 Weather interaction
     feat = feat.merge(weather_interaction_features(min_year, max_year), on="gid", how="left")
@@ -418,7 +418,7 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
     feat["home_pyth_diff"] = feat["home_pyth_diff"].fillna(0.0)
     feat["away_pyth_diff"] = feat["away_pyth_diff"].fillna(0.0)
 
-    # 7.2 Base-running efficiency
+    # 7.2 Base-running efficiency (point-in-time — merge on gid, not season)
     _br = baserunning_features(min_year, max_year)
     for side, team_col in (("home", "hometeam"), ("away", "visteam")):
         tmp = _br.rename(columns={
@@ -426,7 +426,7 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
             "sb_success_rate": f"{side}_sb_success_rate",
             "sb_rate":         f"{side}_sb_rate",
         })
-        feat = feat.merge(tmp, on=["season", team_col], how="left")
+        feat = feat.merge(tmp, on=["gid", team_col], how="left")
 
     # 7.3 Bullpen workload & fatigue
     feat = feat.merge(bullpen_fatigue_features(min_year, max_year), on="gid", how="left")
