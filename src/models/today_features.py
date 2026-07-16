@@ -209,6 +209,19 @@ def build_today_team_table(cur_year: int) -> pd.DataFrame:
             except Exception as exc:  # noqa: BLE001
                 print(f"[today_features] WARNING: {label} failed: {exc}")
                 continue
+            # fielding/kb_rate/lob/baserunning/daynight now return point-in-time
+            # rows keyed by (gid, team) instead of (season, team) — the
+            # lookahead-bias fix means each row is only valid as of that
+            # specific game. For "today" we want each team's most RECENT
+            # snapshot (as of their last played game), so collapse to one
+            # row per team before merging on (season, team) below.
+            if df is not None and not df.empty and "season" not in df.columns and "gid" in df.columns:
+                df = (
+                    df.sort_values("gid")
+                    .groupby("team", as_index=False)
+                    .tail(1)
+                    .assign(season=cur_year)
+                )
             keep_cols = [c for c in cols if c in (df.columns if df is not None else [])]
             # fetch_current_season.py doesn't collect fielding/LOB raw counts
             # (d_po/d_a/d_e/d_dp/lob) for the in-progress season, so these two
@@ -225,6 +238,15 @@ def build_today_team_table(cur_year: int) -> pd.DataFrame:
                     df = fn(cur_year - 1, cur_year - 1)
                     if df is not None and not df.empty:
                         df = df.copy()
+                        if "season" not in df.columns and "gid" in df.columns:
+                            # same point-in-time collapse as above: use each
+                            # team's LAST game of the completed prior season
+                            # as its "full season" snapshot.
+                            df = (
+                                df.sort_values("gid")
+                                .groupby("team", as_index=False)
+                                .tail(1)
+                            )
                         df["season"] = cur_year  # relabel so it still merges onto this year's rows
                         print(f"[today_features] NOTE: {label} has no {cur_year} data yet, "
                               f"using {cur_year - 1} season stats instead.")
