@@ -443,7 +443,7 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
     feat["home_sp_vs_opp_K9"]  = feat["home_sp_vs_opp_K9"].fillna(feat["home_sp_K9"])
     feat["away_sp_vs_opp_K9"]  = feat["away_sp_vs_opp_K9"].fillna(feat["away_sp_K9"])
 
-    # 3.2 Day/night splits
+    # 3.2 Day/night splits (point-in-time — merge on gid, not season)
     _dn = daynight_split_features(min_year, max_year)
     for side, team_col in (("home", "hometeam"), ("away", "visteam")):
         tmp = _dn.rename(columns={
@@ -451,7 +451,7 @@ def build_model_features(min_year: int = 2020, max_year: int = _CUR_YEAR) -> pd.
             "day_WPct":  f"{side}_day_WPct",
             "night_WPct": f"{side}_night_WPct",
         })
-        feat = feat.merge(tmp, on=["season", team_col], how="left")
+        feat = feat.merge(tmp, on=["gid", team_col], how="left")
     # Fill with overall WPct when splits unavailable
     feat["home_day_WPct"]   = feat["home_day_WPct"].fillna(feat["home_WPct"])
     feat["away_day_WPct"]   = feat["away_day_WPct"].fillna(feat["away_WPct"])

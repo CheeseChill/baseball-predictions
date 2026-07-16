@@ -744,39 +744,56 @@ def sp_vs_opp_features(min_year: int, max_year: int) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def daynight_split_features(min_year: int, max_year: int) -> pd.DataFrame:
-    """Season W% split by day vs. night games.
+    """Point-in-time W% split by day vs. night games (no lookahead).
 
-    Returns: season, team, day_WPct, night_WPct
+    For every game, day_WPct/night_WPct reflect only games strictly BEFORE
+    it in that season; early-season (< 10 prior games overall) falls back
+    to the team's full PRIOR season day/night splits.
+
+    Returns: gid, team, day_WPct, night_WPct
     """
-    gi = _load_gameinfo_csv(min_year, max_year)
+    warmup = max(min_year - 1, 2015)
+    gi = _load_gameinfo_csv(warmup, max_year)
     gi["dn"] = gi["daynight"].fillna("n").str.lower().str.strip()
 
     records = []
     for team_col in ("visteam", "hometeam"):
-        tmp = gi[["season", team_col, "dn", "wteam"]].rename(
+        tmp = gi[["gid", "date", "season", team_col, "dn", "wteam"]].rename(
             columns={team_col: "team"}
         ).copy()
         tmp["won"] = (tmp["wteam"] == tmp["team"]).astype(int)
-        records.append(tmp[["season", "team", "dn", "won"]])
+        records.append(tmp[["gid", "date", "season", "team", "dn", "won"]])
 
-    df = pd.concat(records, ignore_index=True)
-    grp = df.groupby(["season", "team", "dn"]).agg(
-        games=("won", "count"), wins=("won", "sum")
+    long = pd.concat(records, ignore_index=True)
+    long["team"] = long["team"].map(_code_to_name)
+    long["day_game"]   = (long["dn"] == "day").astype(int)
+    long["day_win"]    = long["won"] * long["day_game"]
+    long["night_game"] = (long["dn"] == "night").astype(int)
+    long["night_win"]  = long["won"] * long["night_game"]
+
+    prior = _expanding_prior_sums(
+        long, group_cols=["season", "team"],
+        value_cols=["day_game", "day_win", "night_game", "night_win"],
+    )
+    dg = prior["prior_day_game"].where(prior["prior_day_game"] > 0)
+    ng = prior["prior_night_game"].where(prior["prior_night_game"] > 0)
+    prior["day_WPct"]   = (prior["prior_day_win"]   / dg).round(3)
+    prior["night_WPct"] = (prior["prior_night_win"] / ng).round(3)
+
+    full = long.groupby(["season", "team"]).agg(
+        total_day_g=("day_game", "sum"), total_day_w=("day_win", "sum"),
+        total_night_g=("night_game", "sum"), total_night_w=("night_win", "sum"),
     ).reset_index()
-    grp["WPct"] = (grp["wins"] / grp["games"].clip(lower=1)).round(3)
-    # Map Retrosheet codes to full names to match gameinfo/features.py convention
-    grp["team"] = grp["team"].map(_code_to_name)
+    fdg = full["total_day_g"].where(full["total_day_g"] > 0)
+    fng = full["total_night_g"].where(full["total_night_g"] > 0)
+    full["day_WPct"]   = (full["total_day_w"]   / fdg).round(3)
+    full["night_WPct"] = (full["total_night_w"] / fng).round(3)
+    full_season_stats = full[["season", "team", "day_WPct", "night_WPct"]]
 
-    # gameinfo.csv uses 'day' and 'night' (full words)
-    day_   = (
-        grp[grp["dn"] == "day"][["season", "team", "WPct"]]
-        .rename(columns={"WPct": "day_WPct"})
-    )
-    night_ = (
-        grp[grp["dn"] == "night"][["season", "team", "WPct"]]
-        .rename(columns={"WPct": "night_WPct"})
-    )
-    return day_.merge(night_, on=["season", "team"], how="outer")
+    out = prior[["gid", "season", "team", "day_WPct", "night_WPct", "games_played_prior"]]
+    out = _fill_with_prior_season(out, full_season_stats, "team", ["day_WPct", "night_WPct"])
+    out = out[out["season"] >= min_year]
+    return out[["gid", "team", "day_WPct", "night_WPct"]].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +820,11 @@ def platoon_features(min_year: int, max_year: int) -> pd.DataFrame:
             "pct_right_bat": (d["bat"] == "R").mean(),
         })
     ).reset_index()
+    # Lookahead fix: a team's full-season roster mix isn't known at April's
+    # first pitch (late-season call-ups/trades would leak in). Use the
+    # PRIOR season's completed roster mix instead — shift season fwd 1 yr,
+    # same fallback philosophy as the point-in-time team-stat helpers above.
+    bat_grp["season"] = bat_grp["season"] + 1
 
     # Starting pitcher throw arm per game
     p = pd.read_parquet(_RETRO / "pitching.parquet")
@@ -910,11 +932,17 @@ def _build_savant_batter_team_agg(min_year: int, max_year: int) -> pd.DataFrame:
     anchor which players belong to each team, then joins the Savant player_id through
     the Chadwick Bureau registry.
 
+    Lookahead fix: a player's full-season Savant averages (barrel%, exit velo,
+    etc.) aren't known at the season's first pitch. Uses the PRIOR season's
+    completed Savant stats instead — shift season fwd 1 yr, same pattern as
+    the point-in-time helpers above.
+
     Returns DataFrame with columns:
         season, team, team_barrel_pct, team_exit_velo, team_sprint_speed,
         team_oaa, team_xwoba, team_xwoba_diff
     """
-    sv = _load_savant_batter_csv(min_year, max_year)
+    warmup = max(min_year - 1, 2015)
+    sv = _load_savant_batter_csv(warmup, max_year)
     if sv.empty:
         return pd.DataFrame()
 
@@ -928,7 +956,7 @@ def _build_savant_batter_team_agg(min_year: int, max_year: int) -> pd.DataFrame:
                           columns=["id", "team", "date"] if True else None)
     bat = bat[["id", "team", "date"]].copy()
     bat["season"] = pd.to_numeric(bat["date"].astype(str).str[:4], errors="coerce")
-    bat = bat[(bat["season"] >= min_year) & (bat["season"] <= max_year)]
+    bat = bat[(bat["season"] >= warmup) & (bat["season"] <= max_year)]
     bat = bat[["id", "team", "season"]].drop_duplicates()
 
     # Chadwick: retro_id → mlbam player_id
@@ -976,17 +1004,23 @@ def _build_savant_batter_team_agg(min_year: int, max_year: int) -> pd.DataFrame:
     agg = merged.groupby(["season", "team"]).agg(**agg_dict).reset_index()
     team_map = {k: _code_to_name(k) for k in agg["team"].unique()}
     agg["team"] = agg["team"].map(team_map).fillna(agg["team"])
+    agg["season"] = agg["season"] + 1  # shift fwd: only use PRIOR completed season
+    agg = agg[agg["season"] >= min_year]
     return agg.round(3)
 
 
 def _build_savant_sp_agg(min_year: int, max_year: int) -> pd.DataFrame:
     """Aggregate Savant pitcher stats to (season, id_retro) via Chadwick join.
 
+    Lookahead fix: uses the PRIOR season's completed Savant stats — shift
+    season fwd 1 yr, same pattern as the point-in-time helpers above.
+
     Returns DataFrame with columns:
         season, id (retrosheet pitcher ID), sp_xwoba, sp_wobadiff,
         sp_barrel_allowed, sp_whiff_pct, sp_edge_pct
     """
-    sp = _load_savant_pitcher_csv(min_year, max_year)
+    warmup = max(min_year - 1, 2015)
+    sp = _load_savant_pitcher_csv(warmup, max_year)
     if sp.empty:
         return pd.DataFrame()
 
@@ -1019,6 +1053,8 @@ def _build_savant_sp_agg(min_year: int, max_year: int) -> pd.DataFrame:
         "whiff_percent":       "sp_whiff_pct",
         "edge_percent":        "sp_edge_pct",
     })
+    sp["season"] = sp["season"] + 1  # shift fwd: only use PRIOR completed season
+    sp = sp[sp["season"] >= min_year]
     keep = ["id", "season"] + [c for c in ["sp_xwoba", "sp_wobadiff",
             "sp_barrel_allowed", "sp_whiff_pct", "sp_edge_pct"] if c in sp.columns]
     return sp[keep].drop_duplicates(subset=["id", "season"])
@@ -1037,9 +1073,15 @@ def team_consistency(min_year: int, max_year: int) -> pd.DataFrame:
     High con_r + high con_ra → reliable scoring environment (better for unders).
     Low con_r → boom-or-bust offense (wider run distribution).
 
+    Lookahead fix: both the median and each team's rate against it are
+    computed over the FULL season, so using season S's own numbers for a
+    game in season S leaks the whole rest of that season. Uses the PRIOR
+    season's completed numbers instead — shift season fwd 1 yr.
+
     Returns: season, team, con_r, con_ra
     """
-    gi = _load_gameinfo_csv(min_year, max_year)
+    warmup = max(min_year - 1, 2015)
+    gi = _load_gameinfo_csv(warmup, max_year)
     gi["vruns"] = pd.to_numeric(gi["vruns"], errors="coerce")
     gi["hruns"] = pd.to_numeric(gi["hruns"], errors="coerce")
     gi = gi.dropna(subset=["vruns", "hruns"])
@@ -1069,6 +1111,8 @@ def team_consistency(min_year: int, max_year: int) -> pd.DataFrame:
         .reset_index()
     )
     agg["team"] = agg["team"].map(_code_to_name).fillna(agg["team"])
+    agg["season"] = agg["season"] + 1  # shift fwd: only use PRIOR completed season
+    agg = agg[agg["season"] >= min_year]
     return agg[["season", "team", "con_r", "con_ra"]].round(3)
 
 
@@ -1082,6 +1126,9 @@ def woba_team_features(min_year: int, max_year: int) -> pd.DataFrame:
     More accurate than OPS as a per-PA offensive value metric; weights for
     singles, doubles, etc. are era-calibrated rather than hardcoded.
 
+    Lookahead fix: uses the PRIOR season's completed wOBA — shift season
+    fwd 1 yr, same pattern as the point-in-time helpers above.
+
     Returns: season, team, team_wOBA
     """
     try:
@@ -1090,9 +1137,10 @@ def woba_team_features(min_year: int, max_year: int) -> pd.DataFrame:
     except Exception:  # noqa: BLE001
         return pd.DataFrame()
 
+    warmup = max(min_year - 1, 2015)
     bat = pd.read_parquet(_RETRO / "batting.parquet")
     bat["season"] = pd.to_numeric(bat["date"].astype(str).str[:4], errors="coerce")
-    bat = bat[(bat["season"] >= min_year) & (bat["season"] <= max_year)].copy()
+    bat = bat[(bat["season"] >= warmup) & (bat["season"] <= max_year)].copy()
 
     for col in ("b_ab", "b_h", "b_d", "b_t", "b_hr", "b_sf",
                 "b_hbp", "b_w", "b_k"):
@@ -1134,6 +1182,8 @@ def woba_team_features(min_year: int, max_year: int) -> pd.DataFrame:
 
     out = pd.concat(results, ignore_index=True)
     out["team"] = out["team"].map(_code_to_name).fillna(out["team"])
+    out["season"] = out["season"] + 1  # shift fwd: only use PRIOR completed season
+    out = out[out["season"] >= min_year]
     return out[["season", "team", "team_wOBA"]].round(4)
 
 
@@ -1147,6 +1197,10 @@ def fip_sp_features(min_year: int, max_year: int) -> pd.DataFrame:
     FIP outperforms ERA as a predictor of future performance because it strips
     out defensive luck and batted-ball variation.
 
+    Lookahead fix: a pitcher's own full-season FIP isn't known at his first
+    start of that season. Uses the PRIOR season's completed FIP instead —
+    shift season fwd 1 yr, same pattern as the point-in-time helpers above.
+
     Returns: gid, home_sp_FIP, away_sp_FIP
     """
     try:
@@ -1155,17 +1209,18 @@ def fip_sp_features(min_year: int, max_year: int) -> pd.DataFrame:
     except Exception:  # noqa: BLE001
         return pd.DataFrame()
 
-    p = pd.read_parquet(_RETRO / "pitching.parquet")
-    p["season"] = pd.to_numeric(p["date"].astype(str).str[:4], errors="coerce")
-    p = p[(p["season"] >= min_year) & (p["season"] <= max_year)
-          & (p["p_gs"] == 1.0)].copy()
+    warmup = max(min_year - 1, 2015)
+    p_all = pd.read_parquet(_RETRO / "pitching.parquet")
+    p_all["season"] = pd.to_numeric(p_all["date"].astype(str).str[:4], errors="coerce")
+    p_all = p_all[(p_all["season"] >= warmup) & (p_all["season"] <= max_year)
+                  & (p_all["p_gs"] == 1.0)].copy()
     for col in ("p_ipouts", "p_hr", "p_w", "p_iw", "p_k", "p_hbp"):
-        p[col] = pd.to_numeric(p[col], errors="coerce").fillna(0)
-    p["ip"] = p["p_ipouts"] / 3
-    p["uBB"] = (p["p_w"] - p["p_iw"]).clip(lower=0)
+        p_all[col] = pd.to_numeric(p_all[col], errors="coerce").fillna(0)
+    p_all["ip"] = p_all["p_ipouts"] / 3
+    p_all["uBB"] = (p_all["p_w"] - p_all["p_iw"]).clip(lower=0)
 
-    # Season aggregates per pitcher
-    sp_agg = p.groupby(["season", "id"]).agg(
+    # Season aggregates per pitcher (includes the warmup year, for shifting)
+    sp_agg = p_all.groupby(["season", "id"]).agg(
         total_ip=("ip",    "sum"),
         total_hr=("p_hr",  "sum"),
         total_bb=("uBB",   "sum"),
@@ -1191,8 +1246,12 @@ def fip_sp_features(min_year: int, max_year: int) -> pd.DataFrame:
         results.append(season_df)
 
     sp_agg = pd.concat(results, ignore_index=True)
+    sp_agg["season"] = sp_agg["season"] + 1  # shift fwd: only use PRIOR completed season
 
-    # Merge back to game-starter rows
+    # Game-starter rows for the ACTUAL target seasons (unshifted)
+    p = p_all[p_all["season"] >= min_year].copy()
+
+    # Merge back to game-starter rows using the shifted (prior-season) FIP
     p = p.merge(sp_agg[["season", "id", "sp_FIP"]], on=["season", "id"], how="left")
 
     home = (
