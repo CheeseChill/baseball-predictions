@@ -25,6 +25,16 @@ jobs:
           # run even off-season; the script itself exits gracefully
           python scripts/nightly_savant_refresh.py
 
+      - name: Fetch historical Savant leaderboards (all seasons)
+        run: |
+          # nightly_savant_refresh.py above only covers the CURRENT season.
+          # extra_features.py's savant_team_features/savant_sp_features need
+          # multiple PRIOR seasons too (they shift season+1 to avoid
+          # lookahead bias). data_files/raw/ is gitignored (not committed),
+          # so each workflow run starts fresh — re-fetch every time. This is
+          # cheap: 2 HTTP requests total for the whole 2020-2026 range.
+          python -c "from src.ingestion.savant_leaderboard import fetch_all_savant_leaderboards; fetch_all_savant_leaderboards()"
+
       - name: Refresh current-season retrosheet data
         run: |
           # update 2026 game logs, batting, pitching, and player registry
