@@ -40,7 +40,7 @@ from pathlib import Path
 
 import joblib
 from sklearn.pipeline import Pipeline
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 
 
 def _scaler_path(stem: "str | Path") -> Path:
@@ -102,6 +102,69 @@ def save_pipeline(
 
     with open(_meta_path(stem), "w") as f:
         json.dump({"clf_step_name": clf_name, "feature_cols": feature_cols}, f)
+
+
+def save_regressor_pipeline(
+    pipeline: Pipeline,
+    stem: "str | Path",
+    feature_cols: "list[str] | None" = None,
+) -> None:
+    """Save a Pipeline whose LAST step is an XGBRegressor, portably.
+
+    Mirrors save_pipeline() but for XGBRegressor (used by the run-scoring
+    distribution model — see run_distribution_model.py). Same rationale:
+    XGBRegressor's internal C buffer isn't reliably picklable across
+    Python/OS versions, so we use save_model()'s native JSON format instead.
+    """
+    stem = Path(stem)
+    stem.parent.mkdir(parents=True, exist_ok=True)
+
+    *pre_steps, (clf_name, clf) = pipeline.steps
+
+    if not isinstance(clf, XGBRegressor):
+        raise TypeError(
+            "save_regressor_pipeline() expects the last pipeline step to "
+            f"be an XGBRegressor, got {type(clf).__name__}."
+        )
+
+    pre_pipeline = Pipeline(pre_steps) if pre_steps else None
+    joblib.dump(pre_pipeline, _scaler_path(stem))
+
+    clf.save_model(str(_xgb_path(stem)))
+
+    with open(_meta_path(stem), "w") as f:
+        json.dump({"clf_step_name": clf_name, "feature_cols": feature_cols}, f)
+
+
+def load_regressor_pipeline(stem: "str | Path") -> Pipeline:
+    """Load a Pipeline saved with save_regressor_pipeline()."""
+    stem = Path(stem)
+    xgb_path = _xgb_path(stem)
+    scaler_path = _scaler_path(stem)
+    meta_path = _meta_path(stem)
+
+    if not xgb_path.exists():
+        raise FileNotFoundError(
+            f"No portable model found at '{xgb_path}'. Expected files "
+            "created by model_io.save_regressor_pipeline()."
+        )
+
+    clf_step_name = "xgb"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            clf_step_name = json.load(f).get("clf_step_name", "xgb")
+
+    clf = XGBRegressor()
+    clf.load_model(str(xgb_path))
+
+    steps = []
+    if scaler_path.exists():
+        pre_pipeline = joblib.load(scaler_path)
+        if pre_pipeline is not None:
+            steps.extend(pre_pipeline.steps)
+    steps.append((clf_step_name, clf))
+
+    return Pipeline(steps)
 
 
 def _calibrator_path(stem: "str | Path") -> Path:
