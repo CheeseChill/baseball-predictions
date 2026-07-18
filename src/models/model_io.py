@@ -104,6 +104,32 @@ def save_pipeline(
         json.dump({"clf_step_name": clf_name, "feature_cols": feature_cols}, f)
 
 
+def _calibrator_path(stem: "str | Path") -> Path:
+    return Path(str(stem) + ".calibrator.joblib")
+
+
+def save_calibrator(calibrator, stem: "str | Path") -> None:
+    """Save a probability calibrator (e.g. sklearn IsotonicRegression) alongside a model.
+
+    Unlike the XGBoost step, an IsotonicRegression is a plain sklearn/numpy
+    object with no C-buffer portability issue, so a regular joblib.dump is
+    fine here.
+    """
+    joblib.dump(calibrator, _calibrator_path(stem))
+
+
+def load_calibrator(stem: "str | Path"):
+    """Load a saved calibrator, or None if this model has no calibrator file.
+
+    None is a valid, expected return for models trained before calibration
+    was added — callers should treat it as "use the raw model probability".
+    """
+    path = _calibrator_path(stem)
+    if not path.exists():
+        return None
+    return joblib.load(path)
+
+
 def load_feature_cols(stem: "str | Path") -> "list[str] | None":
     """Return the feature_cols saved alongside this model, if any."""
     meta_path = _meta_path(stem)

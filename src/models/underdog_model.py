@@ -17,6 +17,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
@@ -100,6 +101,16 @@ def train_moneyline_model(
         "roc_auc":     float(roc_auc_score(y_test, y_prob)),
     }
 
+    # Probability calibration: XGBoost's raw predict_proba can have decent
+    # ranking (AUC) while still being systematically over/under-confident in
+    # absolute terms. Fit isotonic regression on the (already held-out,
+    # chronologically-later) test split — no extra leakage since this data
+    # was never used to fit the XGBoost step itself.
+    calibrator = IsotonicRegression(out_of_bounds="clip")
+    calibrator.fit(y_prob, y_test)
+    y_prob_calibrated = calibrator.predict(y_prob)
+    metrics["brier_score_calibrated"] = float(brier_score_loss(y_test, y_prob_calibrated))
+
     importances = pd.DataFrame({
         "feature":    feature_cols,
         "importance": model.named_steps["xgb"].feature_importances_,
@@ -114,9 +125,11 @@ def train_moneyline_model(
     test_df["correct"]   = (test_df["pred_win"] == test_df["home_win"]).astype(int)
 
     model_io.save_pipeline(model, MODEL_PATH, feature_cols=feature_cols)
+    model_io.save_calibrator(calibrator, MODEL_PATH)
 
     return {
         "model":        model,
+        "calibrator":   calibrator,
         "metrics":      metrics,
         "importances":  importances,
         "feature_cols": feature_cols,
@@ -155,6 +168,7 @@ def predict_moneyline(
     feature_cols: "list[str] | None" = None,
     home_ml_col: str | None = None,
     away_ml_col: str | None = None,
+    calibrator=None,
 ) -> pd.DataFrame:
     """Generate moneyline win-probability predictions for a set of games.
 
@@ -171,6 +185,12 @@ def predict_moneyline(
         home_ml_col:   Optional column with home moneyline (American odds).
                        If provided, edge vs. the line is computed.
         away_ml_col:   Optional column with away moneyline.
+        calibrator:    Optional fitted IsotonicRegression to post-process the
+                       raw probability (see train_moneyline_model). Defaults
+                       to None, which auto-loads "<stem>.calibrator.joblib"
+                       when model_or_path is a path/stem — falls back to the
+                       raw (uncalibrated) probability if no such file exists
+                       (e.g. an older model trained before calibration).
 
     Returns:
         DataFrame with columns: hometeam, visteam, pred_home_win_prob,
@@ -178,6 +198,10 @@ def predict_moneyline(
     """
     trained_feature_cols = None
     if not isinstance(model_or_path, Pipeline):
+        path = Path(model_or_path)
+        stem = path.with_suffix("") if path.suffix == ".joblib" else path
+        if calibrator is None:
+            calibrator = model_io.load_calibrator(stem)
         model_or_path, trained_feature_cols = _load_model(model_or_path)
 
     if feature_cols is None:
@@ -185,6 +209,8 @@ def predict_moneyline(
 
     X = game_features[feature_cols].fillna(0).values
     probs_home = model_or_path.predict_proba(X)[:, 1]
+    if calibrator is not None:
+        probs_home = calibrator.predict(probs_home)
 
     id_cols = [c for c in ("date", "hometeam", "visteam") if c in game_features.columns]
     results = game_features[id_cols].copy().reset_index(drop=True)

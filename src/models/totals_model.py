@@ -22,6 +22,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
@@ -119,6 +120,13 @@ def train_totals_model(
         "roc_auc":     float(roc_auc_score(y_test, y_prob)),
     }
 
+    # Probability calibration — see underdog_model.train_moneyline_model()
+    # for rationale. Fit on the held-out test split, no extra leakage.
+    calibrator = IsotonicRegression(out_of_bounds="clip")
+    calibrator.fit(y_prob, y_test)
+    y_prob_calibrated = calibrator.predict(y_prob)
+    metrics["brier_score_calibrated"] = float(brier_score_loss(y_test, y_prob_calibrated))
+
     clf = model.named_steps["clf"]
     importances = pd.DataFrame({
         "feature":    feature_cols,
@@ -141,6 +149,7 @@ def train_totals_model(
         # "<stem>.xgb.json".
         model_path = MODEL_DIR / f"totals_{suffix}_v1"
         model_io.save_pipeline(model, model_path, feature_cols=feature_cols)
+        model_io.save_calibrator(calibrator, model_path)
     else:
         # LightGBM isn't handled by model_io yet — unchanged for now.
         # (Note: this "totals_lgbm_v1.joblib" path is also the one
@@ -150,6 +159,7 @@ def train_totals_model(
 
     return {
         "model":        model,
+        "calibrator":   calibrator,
         "metrics":      metrics,
         "importances":  importances,
         "feature_cols": feature_cols,
@@ -186,6 +196,7 @@ def predict_totals(
     feature_cols: "list[str] | None" = None,
     over_price_col: str | None = None,
     under_price_col: str | None = None,
+    calibrator=None,
 ) -> pd.DataFrame:
     """Generate Over/Under predictions for a set of games.
 
@@ -199,6 +210,12 @@ def predict_totals(
                        LightGBM branch, which isn't tracked by model_io).
         over_price_col:  Optional American odds for the Over.
         under_price_col: Optional American odds for the Under.
+        calibrator:    Optional fitted IsotonicRegression (see
+                       train_totals_model). Defaults to None, which
+                       auto-loads "<stem>.calibrator.joblib" when
+                       model_or_path is a path/stem (returns None for the
+                       LightGBM branch, which has no calibrator file —
+                       falls back to the raw probability, unchanged).
 
     Returns:
         DataFrame with: hometeam, visteam, exp_total, pred_prob_over,
@@ -206,6 +223,10 @@ def predict_totals(
     """
     trained_feature_cols = None
     if not isinstance(model_or_path, Pipeline):
+        path = Path(model_or_path)
+        stem = path.with_suffix("") if path.suffix == ".joblib" else path
+        if calibrator is None:
+            calibrator = model_io.load_calibrator(stem)
         model_or_path, trained_feature_cols = _load_model(model_or_path)
 
     if feature_cols is None:
@@ -213,6 +234,8 @@ def predict_totals(
 
     X = game_features[feature_cols].fillna(0).values
     probs_over = model_or_path.predict_proba(X)[:, 1]
+    if calibrator is not None:
+        probs_over = calibrator.predict(probs_over)
 
     id_cols = [c for c in ("date", "hometeam", "visteam", "exp_total")
                if c in game_features.columns]

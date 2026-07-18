@@ -16,6 +16,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
@@ -102,6 +103,16 @@ def train_spread_model(
         "roc_auc":     float(roc_auc_score(y_test, y_prob)),
     }
 
+    # Probability calibration — see underdog_model.train_moneyline_model()
+    # for why this matters: without it, this model's raw probabilities
+    # tend to run systematically HIGH relative to their true frequency,
+    # which is exactly what let "P(home covers -1.5)" exceed "P(home wins)"
+    # for the same game (a logical impossibility) at prediction time.
+    calibrator = IsotonicRegression(out_of_bounds="clip")
+    calibrator.fit(y_prob, y_test)
+    y_prob_calibrated = calibrator.predict(y_prob)
+    metrics["brier_score_calibrated"] = float(brier_score_loss(y_test, y_prob_calibrated))
+
     importances = pd.DataFrame({
         "feature":    feature_cols,
         "importance": model.named_steps["xgb"].feature_importances_,
@@ -116,9 +127,11 @@ def train_spread_model(
     test_df["home_margin"] = test_df["hruns"] - test_df["vruns"]
 
     model_io.save_pipeline(model, MODEL_PATH, feature_cols=feature_cols)
+    model_io.save_calibrator(calibrator, MODEL_PATH)
 
     return {
         "model":        model,
+        "calibrator":   calibrator,
         "metrics":      metrics,
         "importances":  importances,
         "feature_cols": feature_cols,
@@ -150,6 +163,7 @@ def predict_spread(
     game_features: pd.DataFrame,
     feature_cols: "list[str] | None" = None,
     spread_price_col: str | None = None,
+    calibrator=None,
 ) -> pd.DataFrame:
     """Generate run-line cover predictions for a set of games.
 
@@ -161,6 +175,10 @@ def predict_spread(
                        was trained on (from saved metadata), falling back
                        to SPREAD_FEATURES only if unavailable.
         spread_price_col: Optional column with American odds for the -1.5 line.
+        calibrator:    Optional fitted IsotonicRegression (see
+                       train_spread_model). Defaults to None, which
+                       auto-loads "<stem>.calibrator.joblib" when
+                       model_or_path is a path/stem.
 
     Returns:
         DataFrame with: hometeam, visteam, pred_cover_prob, pick_side,
@@ -168,6 +186,10 @@ def predict_spread(
     """
     trained_feature_cols = None
     if not isinstance(model_or_path, Pipeline):
+        path = Path(model_or_path)
+        stem = path.with_suffix("") if path.suffix == ".joblib" else path
+        if calibrator is None:
+            calibrator = model_io.load_calibrator(stem)
         model_or_path, trained_feature_cols = _load_model(model_or_path)
 
     if feature_cols is None:
@@ -175,6 +197,8 @@ def predict_spread(
 
     X = game_features[feature_cols].fillna(0).values
     probs_cover = model_or_path.predict_proba(X)[:, 1]
+    if calibrator is not None:
+        probs_cover = calibrator.predict(probs_cover)
 
     id_cols = [c for c in ("date", "hometeam", "visteam") if c in game_features.columns]
     results = game_features[id_cols].copy().reset_index(drop=True)

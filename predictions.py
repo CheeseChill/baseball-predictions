@@ -268,7 +268,18 @@ def _build_game_recs(
     home_cover_prob = float(model_row["pred_home_cover_prob"]) if model_row is not None else None
 
     if home_favorite:
-        home_rl = home_cover_prob if home_cover_prob is not None else home_prob ** 1.4
+        if home_cover_prob is not None:
+            # Sanity clamp: home_cover_prob and home_prob come from two
+            # INDEPENDENTLY trained models (spread vs. moneyline), so
+            # nothing during training enforces P(home covers -1.5) <=
+            # P(home wins) — but that inequality must always hold (covering
+            # by 2+ implies winning). Without this clamp the two models can
+            # (and empirically do, ~60% of games) disagree enough to show
+            # an impossible number, e.g. "67% to cover" on a team the
+            # moneyline model gives only 56% to win outright.
+            home_rl = min(home_cover_prob, home_prob)
+        else:
+            home_rl = home_prob ** 1.4
         away_rl = 1.0 - home_rl
         home_pick = f"{_short(home_full)} −1.5"
         away_pick = f"{_short(away_full)} +1.5"
