@@ -103,6 +103,20 @@ def run() -> None:
         print(f"  Saving {name} test_df…")
         _save(r["test_df"], f"{name}_test_df")
 
+    # ── Huong C: model phan phoi thong nhat (mu_home/mu_away -> suy toan
+    # ca 3 market qua Skellam/Poisson). predictions.py (Today page) da
+    # chuyen sang dung model nay - phai retrain o day moi ngay, khong thi
+    # model se bi cu dan trong khi 3 model ben tren van duoc lam moi.
+    from src.models.run_distribution_model import train_run_distribution_model
+
+    print("\n  Training run-distribution model (Huong C)…")
+    r_rd = train_run_distribution_model(feat_df)
+    print(f"    -> AUC moneyline {r_rd['metrics']['roc_auc_moneyline']:.4f}"
+          f" | spread {r_rd['metrics']['roc_auc_spread']:.4f}"
+          f" | totals {r_rd['metrics']['roc_auc_totals']:.4f}"
+          f" | consistency_violations {r_rd['metrics']['consistency_violations']}")
+    _save(pd.DataFrame([{"model": "run_distribution", **r_rd["metrics"]}]), "run_distribution_metrics")
+
     # ── Walk-forward backtests ─────────────────────────────────────────────
     from xgboost import XGBClassifier
     from src.evaluation.backtester import walk_forward_backtest, BacktestResult

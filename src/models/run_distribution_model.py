@@ -35,7 +35,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 
 from . import model_io
-from .features import TOTALS_FEATURES
+from .features import TOTALS_FEATURES, calculate_edge
 
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
 MODEL_DIR.mkdir(exist_ok=True)
@@ -180,6 +180,12 @@ def predict_game(
     feature_cols: "list[str] | None" = None,
     total_line_col: str = "exp_total",
     spread_line: float = 1.5,
+    home_ml_col: str | None = None,
+    away_ml_col: str | None = None,
+    home_spread_price_col: str | None = None,
+    away_spread_price_col: str | None = None,
+    over_price_col: str | None = None,
+    under_price_col: str | None = None,
 ) -> pd.DataFrame:
     """Suy ra cả 3 market (moneyline/run line/total) từ 1 model phân phối duy nhất.
 
@@ -189,16 +195,25 @@ def predict_game(
     mu_home/mu_away vốn đã bất đối xứng theo đúng thực lực từng đội.
 
     Args:
-        game_features: DataFrame chứa feature_cols + (tuỳ chọn) cột line.
+        game_features: DataFrame chứa feature_cols + (tuỳ chọn) cột line/odds.
         feature_cols: Mặc định dùng feature_cols đã lưu cùng model.
         total_line_col: Cột chứa mốc tổng điểm (mặc định exp_total).
         spread_line: Biên độ run line (mặc định 1.5, chuẩn MLB).
+        home_ml_col, away_ml_col: Cột odds Mỹ (moneyline) — nếu có, tính
+            edge_home/edge_away = P(model) - implied_probability(odds).
+        home_spread_price_col, away_spread_price_col: Cột odds cho run line
+            phía home/away (giá của bên -1.5/+1.5 tương ứng) — nếu có, tính
+            edge_home_cover/edge_away_cover.
+        over_price_col, under_price_col: Cột odds cho Over/Under — nếu có,
+            tính edge_over/edge_under.
 
     Returns:
         DataFrame: hometeam, visteam, mu_home, mu_away,
         pred_home_win_prob, pred_away_win_prob,
         pred_home_cover_prob, pred_away_cover_prob,
-        pred_over_prob, pred_under_prob, pick_moneyline, pick_runline, pick_total.
+        pred_over_prob, pred_under_prob, pick_moneyline, pick_runline, pick_total,
+        [edge_home, edge_away, edge_home_cover, edge_away_cover, edge_over, edge_under]
+        cho các market có odds tương ứng.
     """
     model_home = model_io.load_regressor_pipeline(HOME_MODEL_PATH)
     model_away = model_io.load_regressor_pipeline(AWAY_MODEL_PATH)
@@ -237,5 +252,38 @@ def predict_game(
         p_home_cover >= p_away_cover, f"Home -{spread_line}", f"Away +{spread_line}"
     )
     results["pick_total"] = np.where(p_over >= 0.5, "Over", "Under")
+
+    def _edge(prob, odds_col):
+        if odds_col is None or odds_col not in game_features.columns:
+            return None
+        odds = game_features[odds_col].values
+        return [
+            calculate_edge(float(p), o) if pd.notna(o) else np.nan
+            for p, o in zip(prob, odds)
+        ]
+
+    if home_ml_col or away_ml_col:
+        e_home = _edge(p_home_win, home_ml_col)
+        e_away = _edge(1 - p_home_win, away_ml_col)
+        if e_home is not None:
+            results["edge_home"] = e_home
+        if e_away is not None:
+            results["edge_away"] = e_away
+
+    if home_spread_price_col or away_spread_price_col:
+        e_hc = _edge(p_home_cover, home_spread_price_col)
+        e_ac = _edge(p_away_cover, away_spread_price_col)
+        if e_hc is not None:
+            results["edge_home_cover"] = e_hc
+        if e_ac is not None:
+            results["edge_away_cover"] = e_ac
+
+    if over_price_col or under_price_col:
+        e_ov = _edge(p_over, over_price_col)
+        e_un = _edge(1 - p_over, under_price_col)
+        if e_ov is not None:
+            results["edge_over"] = e_ov
+        if e_un is not None:
+            results["edge_under"] = e_un
 
     return results

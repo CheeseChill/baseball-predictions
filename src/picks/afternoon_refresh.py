@@ -20,16 +20,14 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from src.ingestion.mlb_stats import fetch_todays_probable_pitchers
 from src.ingestion.odds import fetch_current_odds, get_consensus_line
 from src.ingestion.weather import fetch_weather_for_games
-from src.models.underdog_model import predict_moneyline
-from src.models.spread_model import predict_spread
-from src.models.totals_model import predict_totals
+from src.models.run_distribution_model import predict_game
 from src.picks.daily_pipeline import (
-    MODEL_DIR,
     MIN_CONFIDENCE,
     MIN_EDGE_SPREAD,
     MIN_EDGE_TOTALS,
@@ -146,30 +144,40 @@ def afternoon_picks_refresh(target_date: Optional[date] = None) -> dict:
 
     picks: dict = {}
 
-    underdog_preds = predict_moneyline(
-        model_or_path=MODEL_DIR / "moneyline_xgb_v1.joblib",
-        game_features=features_moved,
+    # Huong C: 1 model phan phoi duy nhat suy ra ca 3 market (xem
+    # src/models/run_distribution_model.py va daily_pipeline.py cho cung
+    # 1 pattern mapping cot).
+    preds = predict_game(
+        features_moved,
+        spread_line=1.5,
         home_ml_col="home_moneyline",
         away_ml_col="away_moneyline",
+        home_spread_price_col="home_spread_price",
+        away_spread_price_col="away_spread_price",
+        over_price_col="over_price",
+        under_price_col="under_price",
     )
+
+    underdog_preds = preds.copy()
+    underdog_preds["pick"] = preds["pick_moneyline"]
+
+    spread_preds = preds.rename(columns={
+        "pred_home_cover_prob": "pred_cover_prob",
+        "edge_home_cover": "edge",
+    }).copy()
+    spread_preds["pick_side"] = preds["pick_runline"]
+
+    totals_preds = preds.rename(columns={"pred_over_prob": "pred_prob_over"}).copy()
+    totals_preds["pick_prob"] = np.where(
+        preds["pred_over_prob"] >= 0.5, preds["pred_over_prob"], preds["pred_under_prob"]
+    )
+    totals_preds["pick_side"] = preds["pick_total"]
+
     picks["underdog"] = _format_picks(
         _filter_picks(underdog_preds, MIN_EDGE_UNDERDOG, MIN_CONFIDENCE), "underdog"
     )
-
-    spread_preds = predict_spread(
-        model_or_path=MODEL_DIR / "spread_xgb_v1.joblib",
-        game_features=features_moved,
-        spread_price_col="home_spread_price",
-    )
     picks["spread"] = _format_picks(
         _filter_picks(spread_preds, MIN_EDGE_SPREAD, MIN_CONFIDENCE), "spread"
-    )
-
-    totals_preds = predict_totals(
-        model_or_path=MODEL_DIR / "totals_xgb_v1.joblib",
-        game_features=features_moved,
-        over_price_col="over_price",
-        under_price_col="under_price",
     )
     picks["over_under"] = _format_picks(
         _filter_picks(totals_preds, MIN_EDGE_TOTALS, MIN_CONFIDENCE), "over_under"
