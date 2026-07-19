@@ -26,6 +26,7 @@ from src.ingestion.mlb_stats import fetch_todays_probable_pitchers
 from src.ingestion.odds import fetch_current_odds, get_consensus_line
 from src.ingestion.weather import fetch_weather_for_games
 from src.models.run_distribution_model import predict_game
+from src.models.today_features import build_todays_features
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,12 @@ def run_daily_pipeline(target_date: Optional[date] = None) -> dict:
     weather = fetch_weather_for_games(schedule)
 
     # ---- 4. Feature matrix --------------------------------------------------
-    features = _build_todays_features(schedule, game_odds, weather)
+    # Dung ham that (da fix, dang chay cho Today page) - stub cu o day thieu
+    # han season/pitcher/Savant stats nen model khong the chay dung.
+    features = build_todays_features(schedule, game_odds, weather)
+    if features.empty:
+        logger.warning("Feature matrix rong - khong the chay model hom nay")
+        return {"underdog": [], "spread": [], "over_under": []}
 
     # ---- 5 & 6. Models + filtering ------------------------------------------
     picks: dict = {}
@@ -90,6 +96,17 @@ def run_daily_pipeline(target_date: Optional[date] = None) -> dict:
         over_price_col="over_price",
         under_price_col="under_price",
     )
+
+    # predict_game() chi tra ve id_cols (date/hometeam/visteam) + cac cot
+    # tinh toan - noi lai game_id/odds/game_time tu features (cung thu tu
+    # hang, khong loc) de _format_picks co du du lieu ghi ra schema day du.
+    extra_cols = [c for c in (
+        "game_id", "home_team", "away_team", "game_time",
+        "home_moneyline", "away_moneyline",
+        "home_spread_price", "away_spread_price",
+        "over_price", "under_price", "posted_total",
+    ) if c in features.columns]
+    preds = pd.concat([preds, features[extra_cols].reset_index(drop=True)], axis=1)
 
     # Giu nguyen shape/ten cot ma _filter_picks/_format_picks da quen dung
     # (moi ham truoc day tra ve 1 df rieng cho 1 market) de khong phai doi
@@ -166,34 +183,6 @@ def _pivot_odds(consensus: pd.DataFrame) -> pd.DataFrame:
     return games
 
 
-def _build_todays_features(
-    schedule: pd.DataFrame,
-    odds: pd.DataFrame,
-    weather: pd.DataFrame,
-) -> pd.DataFrame:
-    """Merge schedule, odds, and weather into a feature matrix."""
-    features = schedule.merge(odds, on=["away_team", "home_team"], how="left")
-    if "game_id" not in features.columns:
-        if "game_id_x" in features.columns:
-            features = features.rename(columns={"game_id_x": "game_id"})
-            if "game_id_y" in features.columns:
-                features = features.drop(columns=["game_id_y"])
-        elif "game_id_y" in features.columns:
-            features = features.rename(columns={"game_id_y": "game_id"})
-
-    if not weather.empty:
-        weather_cols = [
-            c for c in ["game_id", "temp_f", "wind_mph", "wind_dir_deg",
-                         "precip_prob_pct", "is_dome"]
-            if c in weather.columns
-        ]
-        if "game_id" in weather_cols:
-            features = features.merge(weather[weather_cols], on="game_id", how="left")
-
-    # TODO: merge team_season_stats and pitcher_stats from processed/
-    return features
-
-
 def _filter_picks(predictions: pd.DataFrame, min_edge: float, min_confidence: float) -> pd.DataFrame:
     """Return only rows that clear edge and confidence thresholds."""
     edge_col = next((c for c in ("edge", "edge_home", "edge_away", "edge_over") if c in predictions.columns), None)
@@ -212,38 +201,80 @@ def _filter_picks(predictions: pd.DataFrame, min_edge: float, min_confidence: fl
     return filtered
 
 
+_BET_TYPE_MAP = {"underdog": "Moneyline", "spread": "Run Line", "over_under": "Over/Under"}
+
+
 def _format_picks(df: pd.DataFrame, pick_type: str) -> list[dict]:
-    """Serialize a predictions DataFrame to a list of pick dicts."""
+    """Serialize a predictions DataFrame to a list of pick dicts.
+
+    Schema khop voi nhung gi scripts/export_best_bets.py doc tu
+    picks_today.parquet (badge/bet_type/pick/odds/line), cong them cac
+    cot noi bo cu (pick_type/pick_value/confidence_score) de tuong thich
+    nguoc voi code khac dang doc CSV lich su.
+    """
     picks = []
     for _, row in df.iterrows():
         d = row.to_dict()
+        pick_value = d.get("pick_side") or d.get("pick") or ""
+        confidence = round(float(d.get("pick_prob") or d.get("pred_cover_prob") or d.get("pred_home_win_prob") or 0), 3)
+        edge = round(float(d.get("edge") or d.get("edge_home") or d.get("edge_away") or d.get("edge_over") or 0), 3)
+        # Nguong badge: >= MIN_CONFIDENCE la LEAN (da qua filter), >= 0.55
+        # la BET (tin cay cao hon). Con so nay se can tinh chinh khi co du
+        # lieu backtest that cho model moi.
+        badge = "BET" if confidence >= 0.55 else "LEAN"
+
+        if pick_type == "underdog":
+            odds = d.get("home_moneyline") if str(pick_value) == "Home" else d.get("away_moneyline")
+            line = None
+        elif pick_type == "spread":
+            odds = d.get("home_spread_price") if "Home" in str(pick_value) else d.get("away_spread_price")
+            line = 1.5
+        else:
+            odds = d.get("over_price") if str(pick_value) == "Over" else d.get("under_price")
+            line = d.get("posted_total")
+
         picks.append({
             "game_id": d.get("game_id"),
             "away_team": d.get("away_team") or d.get("visteam"),
             "home_team": d.get("home_team") or d.get("hometeam"),
+            "game_time": d.get("game_time"),
             "pick_type": pick_type,
-            "pick_value": d.get("pick_side") or d.get("pick") or "",
+            "bet_type": _BET_TYPE_MAP.get(pick_type, pick_type),
+            "pick_value": pick_value,
+            "pick": pick_value,
             "predicted_prob": round(float(d.get("pred_home_win_prob") or d.get("pick_prob") or d.get("pred_cover_prob") or 0), 3),
-            "confidence_score": round(float(d.get("pick_prob") or d.get("pred_cover_prob") or d.get("pred_home_win_prob") or 0), 3),
-            "edge": round(float(d.get("edge") or d.get("edge_home") or d.get("edge_away") or d.get("edge_over") or 0), 3),
+            "confidence_score": confidence,
+            "confidence": confidence,
+            "edge": edge,
+            "badge": badge,
+            "odds": int(odds) if pd.notna(odds) else None,
+            "line": float(line) if (line is not None and pd.notna(line)) else None,
         })
     return picks
 
 
 def _store_picks(picks: dict, target_date: date, source: str = "morning") -> None:
-    """Write picks to the daily CSV, tagging each row with its source."""
+    """Write picks to the daily CSV (historical log) and picks_today.parquet
+    (snapshot doc boi scripts/export_best_bets.py -> data_files/best_bets_today.json).
+    """
     all_picks = [p for pick_list in picks.values() for p in pick_list]
     if not all_picks:
         return
 
     df = pd.DataFrame(all_picks)
     df["date"] = target_date.isoformat()
+    df["game_date"] = target_date.isoformat()
     df["source"] = source
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
     outpath = PROCESSED_DIR / f"picks_{target_date.isoformat()}.csv"
     df.to_csv(outpath, index=False)
     logger.info("Picks saved → %s", outpath)
+
+    today_path = PROCESSED_DIR / "picks_today.parquet"
+    df.to_parquet(today_path, index=False)
+    logger.info("Picks snapshot saved → %s (doc boi export_best_bets.py)", today_path)
 
 
 def _save_consensus_snapshot(consensus: pd.DataFrame, target_date: date, label: str) -> None:

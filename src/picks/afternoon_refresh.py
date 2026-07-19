@@ -27,13 +27,13 @@ from src.ingestion.mlb_stats import fetch_todays_probable_pitchers
 from src.ingestion.odds import fetch_current_odds, get_consensus_line
 from src.ingestion.weather import fetch_weather_for_games
 from src.models.run_distribution_model import predict_game
+from src.models.today_features import build_todays_features
 from src.picks.daily_pipeline import (
     MIN_CONFIDENCE,
     MIN_EDGE_SPREAD,
     MIN_EDGE_TOTALS,
     MIN_EDGE_UNDERDOG,
     PROCESSED_DIR,
-    _build_todays_features,
     _filter_picks,
     _format_picks,
     _pivot_odds,
@@ -135,7 +135,7 @@ def afternoon_picks_refresh(target_date: Optional[date] = None) -> dict:
     schedule = fetch_todays_probable_pitchers()
     weather = fetch_weather_for_games(schedule)
     game_odds = _pivot_odds(afternoon_consensus)
-    features = _build_todays_features(schedule, game_odds, weather)
+    features = build_todays_features(schedule, game_odds, weather)
 
     features_moved = features[features["game_id"].isin(moved_game_ids)].copy()
     if features_moved.empty:
@@ -157,6 +157,14 @@ def afternoon_picks_refresh(target_date: Optional[date] = None) -> dict:
         over_price_col="over_price",
         under_price_col="under_price",
     )
+
+    extra_cols = [c for c in (
+        "game_id", "home_team", "away_team", "game_time",
+        "home_moneyline", "away_moneyline",
+        "home_spread_price", "away_spread_price",
+        "over_price", "under_price", "posted_total",
+    ) if c in features_moved.columns]
+    preds = pd.concat([preds, features_moved[extra_cols].reset_index(drop=True)], axis=1)
 
     underdog_preds = preds.copy()
     underdog_preds["pick"] = preds["pick_moneyline"]
@@ -204,14 +212,11 @@ def afternoon_picks_refresh(target_date: Optional[date] = None) -> dict:
 def _merge_afternoon_picks(picks: dict, moved_game_ids: set, target_date: date) -> None:
     """Replace morning picks for moved games with the revised afternoon picks."""
     all_new = [p for pick_list in picks.values() for p in pick_list]
-    if not all_new:
-        # Models produced no publishable picks for moved games — still remove
-        # the stale morning picks so we don't surface outdated lines.
-        all_new = []
 
     new_df = pd.DataFrame(all_new) if all_new else pd.DataFrame()
     if not new_df.empty:
         new_df["date"] = target_date.isoformat()
+        new_df["game_date"] = target_date.isoformat()
         new_df["source"] = "afternoon_refresh"
 
     picks_path = PROCESSED_DIR / f"picks_{target_date.isoformat()}.csv"
@@ -229,6 +234,13 @@ def _merge_afternoon_picks(picks: dict, moved_game_ids: set, target_date: date) 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     merged.to_csv(picks_path, index=False)
     logger.info("Updated picks saved → %s", picks_path)
+
+    # picks_today.parquet la file DUY NHAT export_best_bets.py doc - phai
+    # cap nhat lai o day, khong thi ban best_bets_today.json se van dung
+    # picks buoi sang du gia da di chuyen.
+    today_path = PROCESSED_DIR / "picks_today.parquet"
+    merged.to_parquet(today_path, index=False)
+    logger.info("Picks snapshot refreshed → %s", today_path)
 
 
 def _log_movements(significant: pd.DataFrame) -> None:
