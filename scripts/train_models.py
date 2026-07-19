@@ -18,6 +18,7 @@ from src.models.features import build_model_features
 from src.models.underdog_model import train_moneyline_model
 from src.models.spread_model import train_spread_model
 from src.models.totals_model import train_totals_model
+from src.models.run_distribution_model import train_run_distribution_model
 
 
 def main(start_year: int = 2020, end_year: int = None) -> None:
@@ -38,6 +39,17 @@ def main(start_year: int = 2020, end_year: int = None) -> None:
     print("Training totals model…")
     ou_res = train_totals_model(feats)
     print(f"  -> ROC-AUC {ou_res['metrics']['roc_auc']:.4f}")
+
+    # Huong C: model phan phoi thong nhat (mu_home/mu_away -> suy toan ca
+    # 3 market qua Skellam/Poisson). Dung cho Today page (predictions.py).
+    # 3 model o tren van giu de daily_pipeline.py / afternoon_refresh.py /
+    # run_evaluation.py dung - chua migrate, se lam dan.
+    print("Training run-distribution model (Huong C)…")
+    rd_res = train_run_distribution_model(feats)
+    print(f"  -> AUC moneyline {rd_res['metrics']['roc_auc_moneyline']:.4f}"
+          f" | spread {rd_res['metrics']['roc_auc_spread']:.4f}"
+          f" | totals {rd_res['metrics']['roc_auc_totals']:.4f}"
+          f" | consistency_violations {rd_res['metrics']['consistency_violations']}")
 
     print("Training complete. Models written to /models directory.")
 

@@ -35,9 +35,7 @@ from page_utils import (
 )
 
 from src.models.today_features import build_todays_features, team_short_name
-from src.models.underdog_model import predict_moneyline
-from src.models.spread_model import predict_spread
-from src.models.totals_model import predict_totals
+from src.models.run_distribution_model import predict_game
 from src.ingestion.mlb_stats import fetch_todays_probable_pitchers
 from src.ingestion.weather import fetch_weather_for_games
 
@@ -118,15 +116,18 @@ def _load_model_predictions() -> pd.DataFrame:
         if features.empty:
             return pd.DataFrame()
 
-        ml_preds = predict_moneyline(MODEL_DIR / "moneyline_xgb_v1.joblib", features)
-        rl_preds = predict_spread(MODEL_DIR / "spread_xgb_v1.joblib", features)
-        ou_preds = predict_totals(MODEL_DIR / "totals_xgb_v1.joblib", features)
+        # Huong C: 1 model phan phoi duy nhat (mu_home, mu_away) suy ra ca 3
+        # market qua Skellam/Poisson, thay vi 3 XGBoost classifier doc lap.
+        # Dam bao P(cover) <= P(win) bang cau truc toan hoc - khong con can
+        # calibration/clamp va o _build_game_recs nua.
+        preds = predict_game(features, spread_line=1.5)
 
         out = features[["hometeam", "visteam"]].copy()
-        out["pred_home_win_prob"]   = ml_preds["pred_home_win_prob"].values
-        out["pred_home_cover_prob"] = rl_preds["pred_cover_prob"].values
-        out["pred_over_prob"]       = ou_preds["pred_prob_over"].values
-        out["model_exp_total"]      = features["exp_total"].values
+        out["pred_home_win_prob"]    = preds["pred_home_win_prob"].values
+        out["pred_home_cover_prob"]  = preds["pred_home_cover_prob"].values
+        out["pred_away_cover_prob"]  = preds["pred_away_cover_prob"].values
+        out["pred_over_prob"]        = preds["pred_over_prob"].values
+        out["model_exp_total"]       = features["exp_total"].values
         return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("Model prediction pipeline failed, falling back to heuristics: %s", exc)
@@ -182,12 +183,12 @@ def _build_game_recs(
     that number instead of only reporting pipeline-wide success/failure.
 
     model_row, when present, carries pred_home_win_prob / pred_home_cover_prob /
-    pred_over_prob from the trained XGBoost models (src/models/*_model.py).
-    Falls back to the hand-coded heuristics (_estimate_win_prob, **1.4,
-    RS/G vs posted total) whenever the model row is unavailable for this game,
-    and — for the run line specifically — whenever the away team is the
-    favorite (the model currently only predicts P(home covers -1.5), so
-    there's no model-backed number for the away-favorite case yet).
+    pred_away_cover_prob / pred_over_prob, all suy ra tu 1 model phan phoi
+    duy nhat (mu_home, mu_away) qua Skellam/Poisson — xem
+    src/models/run_distribution_model.py. Falls back to the hand-coded
+    heuristics (_estimate_win_prob, **1.4, RS/G vs posted total) only when
+    the model row is unavailable for this game (both home- and away-favorite
+    run-line cases are model-backed now, no special-casing needed).
     """
     home_full = g.get("home_name", "")
     away_full = g.get("away_name", "")
@@ -259,32 +260,21 @@ def _build_game_recs(
     else:
         home_favorite = False
 
-    # home_cover_prob = model's P(home wins by 2+ runs). This directly answers
-    # "does home cover −1.5" but NOT "does away cover −1.5" (that would need
-    # P(away wins by 2+), a different, unmodeled event — 1 - home_cover_prob
-    # also includes 1-run home wins/losses, which don't cover either side).
-    # So the model is only used in the home-favorite case; the heuristic
-    # covers the away-favorite case until a symmetric model exists.
+    # home_cover_prob = P(home thang bang 2+ run) = P(diff >= 2), away_cover_prob
+    # = P(away thang bang 2+ run) = P(diff <= -2). Ca hai suy ra tu CUNG 1 phan
+    # phoi (mu_home, mu_away) qua Skellam (xem run_distribution_model.py), nen
+    # tu dong nhat quan voi pred_home_win_prob - khong con can clamp/heuristic
+    # rieng cho chieu away-favorite nua (model xu ly tu nhien ca 2 chieu).
     home_cover_prob = float(model_row["pred_home_cover_prob"]) if model_row is not None else None
+    away_cover_prob = float(model_row["pred_away_cover_prob"]) if model_row is not None else None
 
     if home_favorite:
-        if home_cover_prob is not None:
-            # Sanity clamp: home_cover_prob and home_prob come from two
-            # INDEPENDENTLY trained models (spread vs. moneyline), so
-            # nothing during training enforces P(home covers -1.5) <=
-            # P(home wins) — but that inequality must always hold (covering
-            # by 2+ implies winning). Without this clamp the two models can
-            # (and empirically do, ~60% of games) disagree enough to show
-            # an impossible number, e.g. "67% to cover" on a team the
-            # moneyline model gives only 56% to win outright.
-            home_rl = min(home_cover_prob, home_prob)
-        else:
-            home_rl = home_prob ** 1.4
+        home_rl = home_cover_prob if home_cover_prob is not None else home_prob ** 1.4
         away_rl = 1.0 - home_rl
         home_pick = f"{_short(home_full)} −1.5"
         away_pick = f"{_short(away_full)} +1.5"
     else:
-        away_rl = away_prob ** 1.4
+        away_rl = away_cover_prob if away_cover_prob is not None else away_prob ** 1.4
         home_rl = 1.0 - away_rl
         home_pick = f"{_short(home_full)} +1.5"
         away_pick = f"{_short(away_full)} −1.5"
@@ -322,7 +312,7 @@ def _build_game_recs(
                 },
                 "best": "home" if (home_rl - impl_h) >= (away_rl - impl_a) else "away",
             }
-            recs["rl_source"] = "model" if (model_row is not None and home_favorite) else "heuristic"
+            recs["rl_source"] = "model" if model_row is not None else "heuristic"
         except (TypeError, ValueError):
             pass
 
