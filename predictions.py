@@ -252,11 +252,30 @@ def _build_game_recs(
     ml_h_val = _parse_american(espn_game.get("ml_home"))
     ml_a_val = _parse_american(espn_game.get("ml_away"))
 
-    if spread_h_val is not None and spread_a_val is not None:
-        # Positive spread odds → that team is the -1.5 side
-        home_favorite = spread_h_val > 0 and spread_a_val <= 0
+    # Primary source of truth: ESPN's own signed spread number relative to the
+    # HOME team (e.g. -1.5 = home favored, +1.5 = home underdog). This comes
+    # straight from the odds provider's "spread" field (same number backing
+    # their "PHI -1.5" style details string) and needs no sign-heuristics on
+    # per-team prices, so it can't be thrown off by unusual run-line pricing.
+    spread_signed = espn_game.get("spread")
+    try:
+        spread_signed = float(spread_signed) if spread_signed is not None else None
+    except (TypeError, ValueError):
+        spread_signed = None
+
+    if spread_signed is not None:
+        home_favorite = spread_signed < 0
     elif ml_h_val is not None and ml_a_val is not None:
+        # Moneyline sign is unambiguous (more negative = bigger favorite),
+        # so it's a more reliable favorite signal than guessing from
+        # per-team run-line price sign — use it before the price heuristic.
         home_favorite = ml_h_val < ml_a_val
+    elif spread_h_val is not None and spread_a_val is not None:
+        # Last-resort fallback: positive run-line price → that team is the
+        # -1.5 side (favorites are priced plus-money on the run line since
+        # covering by 2 runs is harder; underdogs are priced minus-money
+        # since covering +1.5, i.e. not losing by 2+, is comparatively easy).
+        home_favorite = spread_h_val > 0 and spread_a_val <= 0
     else:
         home_favorite = False
 
@@ -500,7 +519,18 @@ def home_page() -> None:
                     score_str = f" &nbsp;·&nbsp; **{g['away_score']}–{g['home_score']}**"
 
             hk = home_full.split()[-1].lower()
-            espn_game = next((eo for eo in espn_odds if hk in eo.get("home_team", "").lower()), None)
+            ak = away_full.split()[-1].lower()
+            # Require BOTH home and away last-name tokens to match, not just
+            # home, so games between two teams sharing a last word (e.g.
+            # "Red Sox" / "White Sox") can't grab the wrong game's odds.
+            espn_game = next(
+                (
+                    eo for eo in espn_odds
+                    if hk in eo.get("home_team", "").lower()
+                    and ak in eo.get("away_team", "").lower()
+                ),
+                None,
+            )
             model_row = _get_model_row(model_preds, home_full, away_full)
             recs      = _build_game_recs(g, espn_game, standings, hist_stnd, model_row)
             home_prob = (

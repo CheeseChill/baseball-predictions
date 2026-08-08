@@ -674,6 +674,10 @@ def _fetch_espn_odds() -> list[dict]:
                 "ml_away":     away_odds.get("moneyLine"),
                 "spread_home": spread_h,
                 "spread_away": spread_a,
+                # Signed spread relative to HOME team (e.g. -1.5 = home favored).
+                # This is ESPN's own authoritative favorite/dog signal — more
+                # reliable than inferring favorite from per-team price sign.
+                "spread":      o.get("spread"),
                 "details":     o.get("details", "—"),
                 "over_under":  o.get("overUnder"),
                 "over_odds":   o.get("overOdds", "—"),
