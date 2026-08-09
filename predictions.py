@@ -35,7 +35,7 @@ from page_utils import (
 )
 
 from src.models.today_features import build_todays_features, team_short_name
-from src.models.run_distribution_model import predict_game
+from src.models.run_distribution_model import predict_game, over_prob_at_line
 from src.ingestion.mlb_stats import fetch_todays_probable_pitchers
 from src.ingestion.weather import fetch_weather_for_games
 
@@ -128,6 +128,12 @@ def _load_model_predictions() -> pd.DataFrame:
         out["pred_away_cover_prob"]  = preds["pred_away_cover_prob"].values
         out["pred_over_prob"]        = preds["pred_over_prob"].values
         out["model_exp_total"]       = features["exp_total"].values
+        # mu_home/mu_away: cần để tính lại P(over) đúng theo kèo tổng điểm
+        # THẬT (posted_total từ ESPN, chỉ có được ở _build_game_recs sau khi
+        # match odds theo từng trận) thay vì dùng luôn pred_over_prob ở đây
+        # (vốn tính so với exp_total — proxy nội bộ, không phải kèo thật).
+        out["mu_home"] = preds["mu_home"].values
+        out["mu_away"] = preds["mu_away"].values
         return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("Model prediction pipeline failed, falling back to heuristics: %s", exc)
@@ -325,7 +331,21 @@ def _build_game_recs(
             posted = float(ou_raw)
             if model_row is not None:
                 exp_total  = float(model_row["model_exp_total"])
-                over_prob  = float(model_row["pred_over_prob"])
+                # QUAN TRỌNG: pred_over_prob trong model_row được tính so với
+                # exp_total (proxy nội bộ, dùng lúc train vì không có lịch sử
+                # kèo tổng điểm thật), KHÔNG phải posted (kèo thật vừa fetch
+                # từ ESPN ở trên). Nếu dùng thẳng pred_over_prob để so với
+                # giá thị trường thật (impl_ov bên dưới) thì edge bị lệch có
+                # hệ thống — 2 xác suất đang trả lời 2 câu hỏi khác nhau.
+                # Tính lại P(over) ngay tại posted bằng mu_home/mu_away đã
+                # có sẵn (Poisson), chỉ fallback về pred_over_prob nếu vì lý
+                # do gì đó thiếu mu_home/mu_away (model cũ/lỗi cache).
+                if "mu_home" in model_row and "mu_away" in model_row:
+                    over_prob = float(
+                        over_prob_at_line(model_row["mu_home"], model_row["mu_away"], posted)
+                    )
+                else:
+                    over_prob  = float(model_row["pred_over_prob"])
             else:
                 exp_total  = _get_rs_g(home_full, hist_stnd) + _get_rs_g(away_full, hist_stnd)
                 diff       = exp_total - posted

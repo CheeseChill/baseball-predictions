@@ -150,6 +150,10 @@ def afternoon_picks_refresh(target_date: Optional[date] = None) -> dict:
     preds = predict_game(
         features_moved,
         spread_line=1.5,
+        # Xem chú thích trong daily_pipeline.py: phải dùng kèo tổng điểm
+        # THẬT (posted_total), không phải exp_total (proxy nội bộ), nếu
+        # không edge Over/Under bị tính lệch có hệ thống.
+        total_line_col="posted_total" if "posted_total" in features_moved.columns else "exp_total",
         home_ml_col="home_moneyline",
         away_ml_col="away_moneyline",
         home_spread_price_col="home_spread_price",
