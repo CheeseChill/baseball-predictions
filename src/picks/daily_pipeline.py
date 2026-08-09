@@ -89,6 +89,12 @@ def run_daily_pipeline(target_date: Optional[date] = None) -> dict:
     preds = predict_game(
         features,
         spread_line=1.5,
+        # posted_total = kèo tổng điểm THẬT từ sách (đã có sẵn trong features
+        # nhờ build_todays_features merge game_odds vào từ đầu) — trước đây
+        # thiếu tham số này nên P(over) bị tính so với exp_total (RS_G cộng
+        # dồn, chỉ là proxy nội bộ), rồi vẫn đem so với giá thị trường thật
+        # để ra edge -> edge Over/Under bị lệch có hệ thống.
+        total_line_col="posted_total" if "posted_total" in features.columns else "exp_total",
         home_ml_col="home_moneyline",
         away_ml_col="away_moneyline",
         home_spread_price_col="home_spread_price",

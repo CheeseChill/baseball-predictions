@@ -175,6 +175,17 @@ def train_run_distribution_model(
 # Inference
 # ---------------------------------------------------------------------------
 
+def over_prob_at_line(mu_home, mu_away, line: float):
+    """Tính lại P(over) tại một mốc tổng điểm bất kỳ, từ (mu_home, mu_away)
+    đã có sẵn. Dùng khi mốc kèo thật (posted_total từ sách) chỉ có được
+    SAU khi model đã chạy (vd Today page, nơi feature matrix không có sẵn
+    odds sống) — tránh phải gọi lại predict_game() hay hard-code lại công
+    thức Poisson ở nơi khác.
+    """
+    mu_total = np.asarray(mu_home, dtype=float) + np.asarray(mu_away, dtype=float)
+    return poisson.sf(np.floor(line), mu_total)
+
+
 def predict_game(
     game_features: pd.DataFrame,
     feature_cols: "list[str] | None" = None,
@@ -197,7 +208,11 @@ def predict_game(
     Args:
         game_features: DataFrame chứa feature_cols + (tuỳ chọn) cột line/odds.
         feature_cols: Mặc định dùng feature_cols đã lưu cùng model.
-        total_line_col: Cột chứa mốc tổng điểm (mặc định exp_total).
+        total_line_col: Cột chứa mốc tổng điểm để tính P(over) — LUÔN truyền
+            cột kèo tổng điểm THẬT (vd "posted_total" từ sách) nếu có sẵn
+            trong game_features; mặc định "exp_total" (RS_G cộng dồn, chỉ
+            là proxy nội bộ dùng lúc train vì không có lịch sử kèo thật)
+            chỉ nên dùng khi không có kèo thật.
         spread_line: Biên độ run line (mặc định 1.5, chuẩn MLB).
         home_ml_col, away_ml_col: Cột odds Mỹ (moneyline) — nếu có, tính
             edge_home/edge_away = P(model) - implied_probability(odds).
@@ -232,7 +247,16 @@ def predict_game(
 
     mu_total = mu_home + mu_away
     if total_line_col in game_features.columns:
-        line = game_features[total_line_col].values
+        line = game_features[total_line_col].astype(float).values
+        # Vài trận có thể chưa mở kèo tổng điểm (posted_total NaN) dù các
+        # trận khác trong cùng batch đã có -> fallback per-row về exp_total
+        # (nếu có) thay vì để NaN lan ra toàn bộ p_over của những trận đó.
+        missing = np.isnan(line)
+        if missing.any() and "exp_total" in game_features.columns:
+            fallback = game_features["exp_total"].astype(float).values
+            line = np.where(missing, fallback, line)
+        elif missing.any():
+            line = np.where(missing, mu_total, line)
     else:
         line = mu_total
     p_over = poisson.sf(np.floor(line), mu_total)
