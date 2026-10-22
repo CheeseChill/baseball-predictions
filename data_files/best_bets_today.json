@@ -1,7 +1,7 @@
 {
   "meta": {
     "sport": "MLB",
-    "generated_at": "2026-10-21T16:57:36.015631+00:00",
+    "generated_at": "2026-10-22T16:59:16.027680+00:00",
     "model_version": "1.0.0",
     "season": "2026",
     "notes": "picks_today.parquet not found — daily pipeline may not have run yet"
